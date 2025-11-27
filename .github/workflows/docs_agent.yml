@@ -1,0 +1,179 @@
+name: 🤖 Documentation Agent (Gemini)
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: 2. Gather Data (Zero-Day Support)
+        id: file_data
+        run: |
+          # Configure git to use the token
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          
+          # Attempt to fetch the base branch (usually main)
+          echo "Fetching base branch..."
+          git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }} || true
+          
+          echo "Calculating diff..."
+          # Try standard diff. If it fails (e.g., empty repo), fallback to listing all files as new.
+          if git diff origin/${{ github.base_ref }}...HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt; then
+             echo "Diff calculated successfully."
+          else
+             echo "Standard diff failed. Fallback to full file list (First commit mode)."
+             git ls-files --exclude-standard | grep -v "^.github/" | xargs -I {} echo "New file: {}" > pr_diff.txt || true
+             for file in $(git ls-files --exclude-standard | grep -v "^.github/" || true); do
+                echo "--- NEW FILE: $file ---" >> pr_diff.txt
+                cat "$file" >> pr_diff.txt
+             done
+          fi
+
+          if [ -f "README.md" ]; then
+            cp README.md current_readme.txt
+          else
+            echo "README.md file not found. Creating from scratch." > current_readme.txt
+          fi
+          
+          # Generate file tree map
+          git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt || true
+
+      - name: 3. Call Gemini API
+        id: gemini_call
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          cat <<'EOF_PROMPT' > prompt_instructions.txt
+          # TASK: DOCUMENTATION MAINTAINER
+          ## GOAL: Create or Update `README.md` based on code changes.
+          
+          ## SITUATION:
+          1. If `[PR_DIFF_CONTENT]` shows "New file", it means this is the first code in the repo. Write a full README from scratch.
+          2. If `[CURRENT_README]` exists, merge changes intelligently.
+          
+          ## GOLDEN STRUCTURE:
+          ---
+          **[GOLDEN_TEMPLATE]**
+          # PROJECT_NAME_PH
+          [Description]
+          ## 1. Table of Contents
+          ## 2. About The Project
+          ## 3. Installation
+          ## 4. Usage
+          ## 5. Configuration
+          ## 6. API Reference
+          ## 7. Deployment
+          ## 8. Roadmap
+          ## 9. License
+          Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
+          
+          This software and associated documentation files (the "Software")
+          are the confidential and proprietary information of Grid Dynamics
+          Holdings, Inc. and may not be copied, reproduced, modified, published,
+          uploaded, posted, transmitted, or distributed in any form or by any
+          means without prior written permission.
+          
+          For questions regarding licensing or usage,
+          contact legal_operations@griddynamics.com
+          ---
+          
+          Output ONLY the Markdown content.
+          EOF_PROMPT
+
+          jq -n \
+            --arg repo "$REPO_NAME" \
+            --rawfile diff pr_diff.txt \
+            --rawfile readme current_readme.txt \
+            --rawfile filetree file_tree.txt \
+            --rawfile prompt prompt_instructions.txt \
+            '{
+              contents: [{
+                parts: [{
+                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## CURRENT FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## PR DIFF:\n" + $diff + "\n---")
+                }]
+              }]
+            }' > payload.json
+
+          curl -s -H "Content-Type: application/json" \
+               -d @payload.json \
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
+
+          if jq -e '.error' response.json > /dev/null; then
+            echo "Error returned from API:"
+            cat response.json
+            exit 1
+          fi
+
+          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
+
+          if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
+             echo "Error: API returned empty."
+             exit 1
+          fi
+
+      - name: 4. Decide Action
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            if (!fs.existsSync('gemini_output.txt')) {
+               console.log("Error: Output file not found.");
+               return;
+            }
+            
+            const output = fs.readFileSync('gemini_output.txt', 'utf8');
+
+            const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
+            const shouldCommit = labels.includes('generate-readme');
+
+            if (shouldCommit) {
+              console.log("LABEL FOUND! Writing file...");
+              fs.writeFileSync('README.md', output);
+            } else {
+              console.log("No label found. Posting comment.");
+              
+              const body = "🤖 **Documentation Agent**\n\n" +
+                           "I have updated the documentation based on the code changes.\n\n" +
+                           "👉 **To apply changes:** Add the label **`generate-readme`** to this PR.\n\n" +
+                           "<details><summary>👀 View suggested README</summary>\n\n" +
+                           "```markdown\n" + output + "\n```\n" +
+                           "</details>";
+              
+              github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: 5. Commit Changes
+        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
+        run: |
+          git config --global user.name "Gemini Docs Agent"
+          git config --global user.email "actions@github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "docs: auto-update README.md [skip ci]"
+            git push
+            # Remove the label
+            curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
+          fi
