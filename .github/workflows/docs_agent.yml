@@ -19,27 +19,15 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: 2. Gather Data (Zero-Day Support)
+      - name: 2. Gather Data
         id: file_data
         run: |
-          # Configure git to use the token
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git fetch origin ${{ github.base_ref }}
           
-          # Attempt to fetch the base branch (usually main)
-          echo "Fetching base branch..."
-          git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }} || true
-          
-          echo "Calculating diff..."
-          # Try standard diff. If it fails (e.g., empty repo), fallback to listing all files as new.
-          if git diff origin/${{ github.base_ref }}...HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt; then
-             echo "Diff calculated successfully."
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
-             echo "Standard diff failed. Fallback to full file list (First commit mode)."
-             git ls-files --exclude-standard | grep -v "^.github/" | xargs -I {} echo "New file: {}" > pr_diff.txt || true
-             for file in $(git ls-files --exclude-standard | grep -v "^.github/" || true); do
-                echo "--- NEW FILE: $file ---" >> pr_diff.txt
-                cat "$file" >> pr_diff.txt
-             done
+            echo "Not a PR (manual run)." > pr_diff.txt
           fi
 
           if [ -f "README.md" ]; then
@@ -48,10 +36,9 @@ jobs:
             echo "README.md file not found. Creating from scratch." > current_readme.txt
           fi
           
-          # Generate file tree map
-          git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt || true
+          git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API
+      - name: 3. Call Gemini API (Change Log Mode)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -59,13 +46,26 @@ jobs:
         run: |
           cat <<'EOF_PROMPT' > prompt_instructions.txt
           # TASK: DOCUMENTATION MAINTAINER
-          ## GOAL: Create or Update `README.md` based on code changes.
+          ## GOAL: Analyze code changes and generate an updated `README.md`.
           
-          ## SITUATION:
-          1. If `[PR_DIFF_CONTENT]` shows "New file", it means this is the first code in the repo. Write a full README from scratch.
-          2. If `[CURRENT_README]` exists, merge changes intelligently.
+          ## INPUTS:
+          1. **FILE TREE:** Current files.
+          2. **DIFF:** Code changes.
+          3. **CURRENT README:** Old content.
           
-          ## GOLDEN STRUCTURE:
+          ## RULES:
+          1. **ALWAYS UPDATE:** Generate the full `README.md`.
+          2. **INTEGRATION:** Merge new features into the existing structure.
+          
+          ## OUTPUT FORMAT (STRICTLY FOLLOW THIS):
+          You must provide two parts in your response, separated by the exact line: **PART 1: CHANGE LOG**
+          List 3-5 bullet points explaining exactly what you changed in the documentation.
+          (e.g., "- Added installation steps for Stripe", "- Updated env vars table").
+          
+          **PART 2: THE FULL README CONTENT**
+          (The actual markdown code for the file).
+          
+          ## GOLDEN STRUCTURE FOR PART 2:
           ---
           **[GOLDEN_TEMPLATE]**
           # PROJECT_NAME_PH
@@ -80,18 +80,8 @@ jobs:
           ## 8. Roadmap
           ## 9. License
           Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
-          
-          This software and associated documentation files (the "Software")
-          are the confidential and proprietary information of Grid Dynamics
-          Holdings, Inc. and may not be copied, reproduced, modified, published,
-          uploaded, posted, transmitted, or distributed in any form or by any
-          means without prior written permission.
-          
-          For questions regarding licensing or usage,
-          contact legal_operations@griddynamics.com
+          (License text...)
           ---
-          
-          Output ONLY the Markdown content.
           EOF_PROMPT
 
           jq -n \
@@ -125,7 +115,7 @@ jobs:
              exit 1
           fi
 
-      - name: 4. Decide Action
+      - name: 4. Decide Action (Smart Split)
         uses: actions/github-script@v6
         with:
           script: |
@@ -136,22 +126,36 @@ jobs:
                return;
             }
             
-            const output = fs.readFileSync('gemini_output.txt', 'utf8');
+            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
+            
+            // РАЗДЕЛЯЕМ ОТВЕТ НА СВОДКУ И КОНТЕНТ
+            const separator = "";
+            let summary = "Documentation updated.";
+            let fileContent = fullOutput;
+
+            if (fullOutput.includes(separator)) {
+               const parts = fullOutput.split(separator);
+               summary = parts[0].trim();
+               fileContent = parts[1].trim();
+            }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
             const shouldCommit = labels.includes('generate-readme');
 
             if (shouldCommit) {
               console.log("LABEL FOUND! Writing file...");
-              fs.writeFileSync('README.md', output);
+              fs.writeFileSync('README.md', fileContent); // Пишем только чистый README, без сводки
             } else {
               console.log("No label found. Posting comment.");
               
+              // Формируем красивый комментарий
               const body = "🤖 **Documentation Agent**\n\n" +
-                           "I have updated the documentation based on the code changes.\n\n" +
-                           "👉 **To apply changes:** Add the label **`generate-readme`** to this PR.\n\n" +
-                           "<details><summary>👀 View suggested README</summary>\n\n" +
-                           "```markdown\n" + output + "\n```\n" +
+                           "### 📝 Что изменилось (Change Log):\n" +
+                           summary + "\n\n" +
+                           "--- \n" +
+                           "👉 **Чтобы применить изменения:** Поставьте метку **`generate-readme`**.\n\n" +
+                           "<details><summary>👀 Посмотреть полный код README.md</summary>\n\n" +
+                           "```markdown\n" + fileContent + "\n```\n" +
                            "</details>";
               
               github.rest.issues.createComment({
@@ -173,7 +177,6 @@ jobs:
           else
             git commit -m "docs: auto-update README.md [skip ci]"
             git push
-            # Remove the label
             curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
           fi
