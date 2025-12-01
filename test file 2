@@ -1,0 +1,113 @@
+import os
+import requests
+import hashlib
+from flask import Flask, request, jsonify, render_template_string
+
+# ========================================================
+# 🔒 SECURITY CONFIGURATION
+# ========================================================
+STRIPE_SECRET_KEY = "sk_live_83491_DO_NOT_LEAK_THIS_SECRET" 
+ADMIN_TOKEN = "super-secret-password-123"
+
+app = Flask(__name__)
+
+# Простая HTML страница прямо внутри Python (для удобства теста)
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Refund Portal</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f4f6f8; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 350px; }
+        h2 { color: #1a1f36; margin-top: 0; }
+        .input-group { margin-bottom: 1rem; }
+        label { display: block; margin-bottom: 0.5rem; color: #4f566b; font-size: 0.9rem; }
+        input { width: 100%; padding: 10px; border: 1px solid #e1e1e1; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; background: #5469d4; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #4c5fbf; }
+        #result { margin-top: 1rem; padding: 10px; border-radius: 6px; display: none; font-size: 0.9rem; }
+        .success { background: #e3fcf7; color: #0d6859; border: 1px solid #a2f0e3; }
+        .error { background: #ffe3e3; color: #ad1d1d; border: 1px solid #ffbaba; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>💸 Issue Refund</h2>
+        <div class="input-group">
+            <label>Transaction ID</label>
+            <input type="text" id="txId" placeholder="tx_123456789">
+        </div>
+        <div class="input-group">
+            <label>Amount ($)</label>
+            <input type="number" id="amount" placeholder="50.00">
+        </div>
+        <button onclick="processRefund()">Process Refund</button>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        async function processRefund() {
+            const txId = document.getElementById('txId').value;
+            const amount = document.getElementById('amount').value;
+            const resultDiv = document.getElementById('result');
+            
+            resultDiv.style.display = 'none';
+            resultDiv.className = '';
+
+            try {
+                const response = await fetch('/api/refund', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transaction_id: txId, amount: parseFloat(amount) })
+                });
+                
+                const data = await response.json();
+                
+                resultDiv.style.display = 'block';
+                if (response.ok) {
+                    resultDiv.className = 'success';
+                    resultDiv.innerHTML = `✅ ${data.message} <br><small>ID: ${data.id}</small>`;
+                } else {
+                    resultDiv.className = 'error';
+                    resultDiv.innerText = `❌ Error: ${data.error}`;
+                }
+            } catch (err) {
+                resultDiv.style.display = 'block';
+                resultDiv.className = 'error';
+                resultDiv.innerText = "❌ Network Error";
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def home():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/refund', methods=['POST'])
+def api_refund():
+    data = request.json
+    tx_id = data.get('transaction_id')
+    amount = data.get('amount')
+
+    # Security Check (Mock)
+    if not STRIPE_SECRET_KEY:
+        return jsonify({"error": "Server misconfiguration"}), 500
+
+    # Business Logic
+    print(f"Processing refund: {tx_id} for ${amount}")
+    
+    return jsonify({
+        "status": "refunded", 
+        "id": tx_id,
+        "message": f"Successfully refunded ${amount}"
+    })
+
+if __name__ == "__main__":
+    # In a real scenario, never run with debug=True in production
+    app.run(port=5000)
