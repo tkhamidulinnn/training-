@@ -23,7 +23,6 @@ jobs:
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
-          
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
@@ -38,88 +37,37 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      # ========================================================
-      # 🆕 НОВАЯ ФИЧА: АВТО-ЗАПОЛНЕНИЕ ОПИСАНИЯ PR
-      # ========================================================
-      - name: 3. Generate PR Description
-        id: pr_desc_gen
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          cat <<'EOF_PROMPT' > pr_prompt.txt
-          # ROLE: Senior Tech Lead
-          # TASK: Write a Pull Request Description based on the code diff.
-          
-          # OUTPUT FORMAT (Markdown):
-          ## 🚀 Summary
-          [2-3 sentences explaining WHAT changed and WHY]
-          
-          ## 🛠 Key Changes
-          * [Bullet point 1]
-          * [Bullet point 2]
-          
-          ## 🧪 How to Test
-          [Specific instructions on how to run/test the new code, e.g. "Run python script.py"]
-          
-          ## ⚠️ Breaking Changes
-          [List breaking changes or "None"]
-          
-          # RULE:
-          Keep it concise, professional, and developer-focused. Output ONLY the markdown.
-          EOF_PROMPT
-
-          jq -n \
-            --rawfile diff pr_diff.txt \
-            --rawfile prompt pr_prompt.txt \
-            '{
-              contents: [{
-                parts: [{
-                  text: ($prompt + "\n\n## CODE DIFF:\n" + $diff)
-                }]
-              }]
-            }' > pr_payload.json
-
-          curl -s -H "Content-Type: application/json" \
-               -d @pr_payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
-
-          jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_description.md
-
-      - name: 4. Update PR Body
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            if (!fs.existsSync('pr_description.md')) return;
-            
-            const newBody = fs.readFileSync('pr_description.md', 'utf8');
-            
-            // Мы обновляем описание самого PR (не комментарий!)
-            await github.rest.pulls.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              body: newBody
-            });
-
-      # ========================================================
-      # ⬇️ СТАРАЯ ФИЧА: ГЕНЕРАЦИЯ README (Ниже без изменений)
-      # ========================================================
-      - name: 5. Generate README Content
-        id: gemini_readme
+      - name: 3. Call Gemini API (STABLE MODE)
+        id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           cat <<'EOF_PROMPT' > prompt_instructions.txt
           # TASK: DOCUMENTATION MAINTAINER
-          ## GOAL: Update `README.md` based on code changes.
           
-          ## RULES:
-          1. **ALWAYS UPDATE:** Generate the full `README.md`.
-          2. **INTEGRATION:** Merge new features into the existing structure.
+          ## GOAL:
+          Update the `README.md` to reflect code changes while **MINIMIZING THE DIFF**.
           
-          ## GOLDEN STRUCTURE:
+          ## CRITICAL RULE: STABILITY & PRESERVATION
+          You are NOT a creative writer. You are a strict editor.
+          1. **DO NOT REWRITE** existing text if the logic hasn't changed. Copy it word-for-word.
+          2. **DO NOT REFORMAT** lists or tables if they are already correct.
+          3. **ONLY ADD** new sections for new files/features.
+          4. **ONLY EDIT** specific lines where configuration/logic has changed.
+          
+          ## STRATEGY:
+          * Compare `[CURRENT_README]` with `[DIFF]`.
+          * Identify exactly what is new (e.g., new `env` var).
+          * Surgically insert that new var into the existing table. Leave the rest alone.
+          
+          ## OUTPUT FORMAT (JSON):
+          {
+            "summary": "Short bullet list of changes (e.g. 'Added stripe config')",
+            "readme": "The full content of README.md (mostly unchanged, except for updates)"
+          }
+          
+          ## GOLDEN STRUCTURE (Ensure this structure exists):
           ---
           **[GOLDEN_TEMPLATE]**
           # PROJECT_NAME_PH
@@ -137,7 +85,7 @@ jobs:
           (Standard License Text...)
           ---
           
-          Output ONLY the Markdown content.
+          Output ONLY raw JSON.
           EOF_PROMPT
 
           jq -n \
@@ -149,25 +97,44 @@ jobs:
             '{
               contents: [{
                 parts: [{
-                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## CURRENT FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## PR DIFF:\n" + $diff + "\n---")
+                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## INPUT DATA\n---\n**[CURRENT_README]**\n" + $readme + "\n---\n**[PR_DIFF_CONTENT]**\n" + $diff + "\n---")
                 }]
               }]
-            }' > readme_payload.json
+            }' > payload.json
 
           curl -s -H "Content-Type: application/json" \
-               -d @readme_payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > readme_response.json
+               -d @payload.json \
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
 
-          jq -r '.candidates[0].content.parts[0].text' readme_response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
+          # Parse JSON response
+          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > raw_content.json
+          
+          if jq -e . raw_content.json > /dev/null 2>&1; then
+             jq -r '.summary' raw_content.json > summary.txt
+             jq -r '.readme' raw_content.json > gemini_output.txt
+          else
+             # Fallback if AI fails to output JSON
+             echo "Documentation updated based on code changes." > summary.txt
+             cat raw_content.json > gemini_output.txt
+          fi
 
-      - name: 6. Decide Action (README)
+          if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
+             echo "Error: API returned empty."
+             exit 1
+          fi
+
+      - name: 4. Decide Action
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
-            
             if (!fs.existsSync('gemini_output.txt')) return;
+            
             const output = fs.readFileSync('gemini_output.txt', 'utf8');
+            let summary = "Updated documentation.";
+            if (fs.existsSync('summary.txt')) {
+               summary = fs.readFileSync('summary.txt', 'utf8');
+            }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
             const shouldCommit = labels.includes('generate-readme');
@@ -177,9 +144,11 @@ jobs:
               fs.writeFileSync('README.md', output);
             } else {
               const body = "🤖 **Documentation Agent**\n\n" +
-                           "Я обновил описание этого Пул-реквеста (см. выше) и предлагаю обновить `README.md`.\n\n" +
-                           "👉 **Применить README?** Поставьте метку **`generate-readme`**.\n\n" +
-                           "<details><summary>👀 Показать текст README</summary>\n\n" +
+                           "### 📝 Что изменилось (Change Log):\n" +
+                           summary + "\n\n" +
+                           "--- \n" +
+                           "👉 **Применить?** Поставьте метку **`generate-readme`**.\n\n" +
+                           "<details><summary>👀 Посмотреть полный README.md</summary>\n\n" +
                            "```markdown\n" + output + "\n```\n" +
                            "</details>";
               
@@ -191,7 +160,7 @@ jobs:
               });
             }
 
-      - name: 7. Commit Changes
+      - name: 5. Commit Changes
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
