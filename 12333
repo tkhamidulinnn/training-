@@ -1,14 +1,4 @@
-# Было (Красное - удаляется)
-## Authentication
-The system uses simple **Basic Auth**.
-Provide `username` and `password` in the header.
 
-# Стало (Зеленое - добавляется)
-## Authentication
-The system now uses **JWT Tokens** for security.
-1. Obtain token via `/login`.
-2. Pass `Authorization: Bearer <token>` in headers.
-*(Updated to match `auth.py` changes)*
 
 ---
 ## Recent Changes
