@@ -23,6 +23,7 @@ jobs:
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
+          
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
@@ -37,31 +38,34 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (JSON Mode)
+      - name: 3. Call Gemini API (Safe Mode)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          # 1. Создаем промпт
           cat <<'EOF_PROMPT' > prompt_instructions.txt
           # TASK: DOCUMENTATION MAINTAINER
-          ## GOAL: Analyze code changes and generate: 1) A summary of changes, 2) The updated README.
           
           ## INPUTS:
-          1. **FILE TREE:** Current files.
+          1. **FILE TREE:** Active files.
           2. **DIFF:** Code changes.
           3. **CURRENT README:** Old content.
           
-          ## RULES:
-          1. **ALWAYS UPDATE:** Generate the full `README.md`.
-          2. **INTEGRATION:** Merge new features into the existing structure.
+          ## GOAL:
+          Generate a "Change Log" summary AND the full updated "README.md".
           
-          ## OUTPUT FORMAT (JSON ONLY):
-          You must respond with a valid JSON object containing exactly two keys:
-          {
-            "summary": "A bulleted list (string) describing top 3-5 changes. Use emojis.",
-            "readme": "The full markdown content of the new README.md"
-          }
+          ## OUTPUT FORMAT (STRICT):
+          You must provide two parts separated by "---SPLIT---".
+          
+          **PART 1: CHANGE LOG**
+          (Bullet points with emojis describing what changed)
+          
+          ---SPLIT---
+          
+          **PART 2: README CONTENT**
+          (The full markdown code for the file)
           
           ## GOLDEN STRUCTURE FOR README:
           ---
@@ -81,26 +85,35 @@ jobs:
           (License text...)
           ---
           
-          **IMPORTANT:** Do not wrap the output in markdown code blocks (like ```json). Just output raw JSON.
+          Output ONLY the raw text.
           EOF_PROMPT
 
+          # 2. Подготовка текста (Замена имени проекта через sed - это безопаснее)
+          sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" prompt_instructions.txt
+
+          # 3. Сборка полного промпта в один файл (чтобы не грузить jq логикой)
+          echo -e "\n\n## CURRENT FILE TREE:\n" >> prompt_instructions.txt
+          cat file_tree.txt >> prompt_instructions.txt
+          echo -e "\n\n## CURRENT README:\n" >> prompt_instructions.txt
+          cat current_readme.txt >> prompt_instructions.txt
+          echo -e "\n\n## PR DIFF:\n" >> prompt_instructions.txt
+          cat pr_diff.txt >> prompt_instructions.txt
+
+          # 4. Сборка JSON (теперь jq делает только упаковку)
           jq -n \
-            --arg repo "$REPO_NAME" \
-            --rawfile diff pr_diff.txt \
-            --rawfile readme current_readme.txt \
-            --rawfile filetree file_tree.txt \
             --rawfile prompt prompt_instructions.txt \
             '{
               contents: [{
                 parts: [{
-                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## CURRENT FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## PR DIFF:\n" + $diff + "\n---")
+                  text: $prompt
                 }]
               }]
             }' > payload.json
 
+          # 5. Отправка
           curl -s -H "Content-Type: application/json" \
                -d @payload.json \
-               "[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY)" > response.json
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
 
           if jq -e '.error' response.json > /dev/null; then
             echo "Error returned from API:"
@@ -108,25 +121,14 @@ jobs:
             exit 1
           fi
 
-          # 1. Извлекаем текстовый ответ (который является JSON-строкой)
-          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > raw_content.json
-
-          # 2. Парсим этот JSON на два файла: summary.txt и gemini_output.txt
-          if jq -e . raw_content.json > /dev/null 2>&1; then
-             jq -r '.summary' raw_content.json > summary.txt
-             jq -r '.readme' raw_content.json > gemini_output.txt
-          else
-             echo "Error: Gemini response was not valid JSON. Falling back to raw text."
-             cat raw_content.json > gemini_output.txt
-             echo "Documentation updated." > summary.txt
-          fi
+          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
 
           if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
              echo "Error: API returned empty."
              exit 1
           fi
 
-      - name: 4. Decide Action (With Summary)
+      - name: 4. Decide Action (Split & Publish)
         uses: actions/github-script@v6
         with:
           script: |
@@ -137,11 +139,17 @@ jobs:
                return;
             }
             
-            const output = fs.readFileSync('gemini_output.txt', 'utf8');
-            // Читаем саммари, если оно есть
-            let summary = "Documentation updated based on code changes.";
-            if (fs.existsSync('summary.txt')) {
-               summary = fs.readFileSync('summary.txt', 'utf8');
+            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
+            
+            // Разделяем по нашему маркеру
+            const separator = "---SPLIT---";
+            let summary = "Documentation updated.";
+            let readmeContent = fullOutput;
+
+            if (fullOutput.includes(separator)) {
+               const parts = fullOutput.split(separator);
+               summary = parts[0].trim();
+               readmeContent = parts[1].trim();
             }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
@@ -149,7 +157,7 @@ jobs:
 
             if (shouldCommit) {
               console.log("LABEL FOUND! Writing file...");
-              fs.writeFileSync('README.md', output);
+              fs.writeFileSync('README.md', readmeContent);
             } else {
               console.log("No label found. Posting comment.");
               
@@ -157,9 +165,9 @@ jobs:
                            "### 📝 Что изменилось (Change Log):\n" +
                            summary + "\n\n" +
                            "--- \n" +
-                           "👉 **Применить?** Поставьте метку **`generate-readme`**.\n\n" +
-                           "<details><summary>👀 Показать полный README</summary>\n\n" +
-                           "```markdown\n" + output + "\n```\n" +
+                           "👉 **Чтобы применить:** Поставьте метку **`generate-readme`**.\n\n" +
+                           "<details><summary>👀 Посмотреть полный README.md</summary>\n\n" +
+                           "```markdown\n" + readmeContent + "\n```\n" +
                            "</details>";
               
               github.rest.issues.createComment({
@@ -182,5 +190,5 @@ jobs:
             git commit -m "docs: auto-update README.md [skip ci]"
             git push
             curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
+              "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
           fi
