@@ -74,26 +74,44 @@ jobs:
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
       - name: 3. Generate PR Description
-        if: github.event_name == 'pull_request'
+       # ========================================================
+      # 📝 ЧАСТЬ 1: ГЕНЕРАЦИЯ ОБНОВЛЕНИЯ ДЛЯ PR
+      # ========================================================
+      - name: 3. Generate PR Update
         id: pr_desc_gen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # ⬇️ СТАНДАРТ: UTC (Universal Time)
+          TZ: "UTC"
         run: |
-          cat <<'EOF_PROMPT' > pr_prompt.txt
+          # 1. Получаем время
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M %Z')
+          echo "Date captured: $CURRENT_DATE"
+
+          # 2. Создаем промпт с датой
+          cat <<EOF_PROMPT > pr_prompt.txt
           # TASK: PR UPDATE WRITER
           Generate a short update block for the Pull Request description.
-          # OUTPUT FORMAT:
-          ### 🔄 Update ({{DATE}})
-          * [Bullet point 1]
-          * [Bullet point 2]
-          # RULE: Keep it very short.
-          EOF_PROMPT
           
-          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M')
-          sed -i "s/{{DATE}}/$CURRENT_DATE/g" pr_prompt.txt
+          # OUTPUT FORMAT (Markdown):
+          ### 🔄 Update ($CURRENT_DATE)
+          * [What changed in this specific commit?]
+          * [Key technical detail]
+          
+          # RULE:
+          Keep it very short (bullet points only). Focus on the code in the DIFF.
+          EOF_PROMPT
 
-          jq -n --rawfile diff pr_diff.txt --rawfile prompt pr_prompt.txt '{ contents: [{ parts: [{ text: ($prompt + "\n\n## DIFF:\n" + $diff) }] }] }' > pr_payload.json
-          curl -s -H "Content-Type: application/json" -d @pr_payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
+          # 3. Отправляем в Gemini
+          jq -n \
+            --rawfile diff pr_diff.txt \
+            --rawfile prompt pr_prompt.txt \
+            '{ contents: [{ parts: [{ text: ($prompt + "\n\n## LATEST CODE DIFF:\n" + $diff) }] }] }' > pr_payload.json
+
+          curl -s -H "Content-Type: application/json" \
+               -d @pr_payload.json \
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
+
           jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_update_block.md
 
       - name: 4. Update PR Body
