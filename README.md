@@ -224,4 +224,3 @@ means without prior written permission.
 
 For questions regarding licensing or usage,
 contact legal_operations@griddynamics.com
-
