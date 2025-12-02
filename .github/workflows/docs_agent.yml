@@ -28,12 +28,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: 2. Gather Data (Hybrid Mode)
+      - name: 2. Gather Data (Fixed Syntax)
         id: file_data
         run: |
+          # 1. Fetch base branch
           git fetch origin ${{ github.base_ref }} || true
           
-          # Определяем режим работы
+          # 2. Determine Mode
           MODE="${{ github.event.inputs.mode }}"
           if [ "${{ github.event_name }}" == "pull_request" ]; then
              MODE="diff"
@@ -41,22 +42,183 @@ jobs:
           
           echo "🚀 Running in mode: $MODE"
 
+          # 3. Collect Content based on Mode
           if [ "$MODE" == "diff" ]; then
-             # Стандартный режим: анализ изменений
+             # Standard Diff Mode
              git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           
           elif [ "$MODE" == "full_scan" ]; then
-             # Режим Архитектора: читаем весь проект
-             echo "Reading all critical source files..."
-             # Находим файлы кода, исключая мусор
-             find . -maxdepth 4 -not -path '*/.*' -not -path './node_modules*' -not -path './venv*' -not -path './__pycache__*' | grep -E "\.(py|js|ts|go|java|md|json|yml|yaml)$" > all_files_list.txt
+             # Architect Mode: Read all files
+             echo "Reading critical source files..."
+             find . -maxdepth 4 -not -path '*/.*' -not -path './node_modules*' -not -path './venv*' | grep -E "\.(py|js|ts|go|java|md|json|yml|yaml)$" > all_files_list.txt
              
              echo "FULL REPOSITORY SCAN:" > pr_diff.txt
-             while read file; do
+             while read -r file; do
                echo "--- FILE: $file ---" >> pr_diff.txt
                cat "$file" >> pr_diff.txt
-               echo -e "\n" >> pr_diff.txt
+               printf "\n" >> pr_diff.txt
              done < all_files_list.txt
+             
+          else
+             echo "Manual run without changes." > pr_diff.txt
           fi
 
-          if
+          # 4. Prepare README context
+          if [ -f "README.md" ]; then
+            cp README.md current_readme.txt
+          else
+            echo "README.md file not found." > current_readme.txt
+          fi
+          
+          # 5. Generate File Tree
+          git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
+
+      - name: 3. Generate PR Description
+        if: github.event_name == 'pull_request'
+        id: pr_desc_gen
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          cat <<'EOF_PROMPT' > pr_prompt.txt
+          # TASK: PR UPDATE WRITER
+          Generate a short update block for the Pull Request description.
+          # OUTPUT FORMAT:
+          ### 🔄 Update ({{DATE}})
+          * [Bullet point 1]
+          * [Bullet point 2]
+          # RULE: Keep it very short.
+          EOF_PROMPT
+          
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M')
+          sed -i "s/{{DATE}}/$CURRENT_DATE/g" pr_prompt.txt
+
+          jq -n --rawfile diff pr_diff.txt --rawfile prompt pr_prompt.txt '{ contents: [{ parts: [{ text: ($prompt + "\n\n## DIFF:\n" + $diff) }] }] }' > pr_payload.json
+          curl -s -H "Content-Type: application/json" -d @pr_payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
+          jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_update_block.md
+
+      - name: 4. Update PR Body
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('pr_update_block.md')) return;
+            const newBlock = fs.readFileSync('pr_update_block.md', 'utf8');
+            const { data: pr } = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number });
+            let currentBody = pr.body || "";
+            if (!currentBody.includes("## 🚀 AI Summary Log")) { currentBody = "## 🚀 AI Summary Log\n" + currentBody; }
+            const updatedBody = currentBody.replace("## 🚀 AI Summary Log", "## 🚀 AI Summary Log\n\n" + newBlock);
+            await github.rest.pulls.update({ owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number, body: updatedBody });
+
+      - name: 5. Generate README
+        id: gemini_readme
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          cat <<'EOF_PROMPT' > readme_prompt.txt
+          # TASK: DOCUMENTATION MAINTAINER
+          ## GOAL: Update or Rewrite `README.md` based on the code provided.
+          ## RULES:
+          1. **ALWAYS UPDATE:** Generate the full `README.md`.
+          2. **INTEGRATION:** Merge new features.
+          
+          ## OUTPUT FORMAT:
+          Split response with "---SPLIT---".
+          **PART 1: CHANGE LOG** (Summary)
+          ---SPLIT---
+          **PART 2: FULL README** (Markdown content)
+          
+          ## GOLDEN STRUCTURE:
+          ---
+          **[GOLDEN_TEMPLATE]**
+          # PROJECT_NAME_PH
+          [Description]
+          ## 1. Table of Contents
+          ## 2. About The Project
+          ## 3. Installation
+          ## 4. Usage
+          ## 5. Configuration
+          ## 6. API Reference
+          ## 7. Deployment
+          ## 8. Roadmap
+          ## 9. License
+          Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
+          (Standard License Text...)
+          ---
+          EOF_PROMPT
+
+          sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" readme_prompt.txt
+          
+          jq -n \
+            --arg repo "$REPO_NAME" \
+            --rawfile diff pr_diff.txt \
+            --rawfile readme current_readme.txt \
+            --rawfile filetree file_tree.txt \
+            --rawfile prompt readme_prompt.txt \
+            '{ contents: [{ parts: [{ text: ($prompt + "\n\n## FILES:\n" + $filetree + "\n\n## README:\n" + $readme + "\n\n## CODE CONTENT:\n" + $diff) }] }] }' > readme_payload.json
+
+          curl -s -H "Content-Type: application/json" -d @readme_payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > readme_response.json
+          jq -r '.candidates[0].content.parts[0].text' readme_response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
+
+      - name: 6. Decide Action
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('gemini_output.txt')) return;
+            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
+            
+            const separator = "---SPLIT---";
+            let summary = "Documentation updated.";
+            let readmeContent = fullOutput;
+
+            if (fullOutput.includes(separator)) {
+               const parts = fullOutput.split(separator);
+               summary = parts[0].trim();
+               readmeContent = parts[1].trim();
+            }
+
+            if (context.eventName === 'pull_request') {
+                const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
+                const shouldCommit = labels.includes('generate-readme');
+
+                if (shouldCommit) {
+                  console.log("LABEL FOUND! Writing file...");
+                  fs.writeFileSync('README.md', readmeContent);
+                } else {
+                  console.log("Updating comment...");
+                  const header = "🤖 **Documentation Agent**";
+                  const body = `${header}\n\n### 📝 Change Log:\n${summary}\n\n---\n👉 **Apply?** Add label **\`generate-readme\`**.\n\n<details><summary>👀 View README</summary>\n\`\`\`markdown\n${readmeContent}\n\`\`\`\n</details>`;
+                  
+                  const { data: comments } = await github.rest.issues.listComments({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                  });
+                  const botComment = comments.find(c => c.body.includes(header));
+                  if (botComment) {
+                    await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: botComment.id, body: body });
+                  } else {
+                    await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: body });
+                  }
+                }
+            } else {
+                console.log("MANUAL RUN DETECTED. Printing README to logs:");
+                console.log(readmeContent);
+            }
+
+      - name: 7. Commit Changes
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'generate-readme')
+        run: |
+          git config --global user.name "Gemini Docs Agent"
+          git config --global user.email "actions@github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "docs: auto-update README.md [skip ci]"
+            git push
+            curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
+          fi
