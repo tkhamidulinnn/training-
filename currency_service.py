@@ -41,3 +41,9 @@ if __name__ == "__main__":
     # Usage Example
     converter = CurrencyConverter()
     print(f"100 USD in EUR: {converter.convert(100, 'USD', 'EUR')}")
+
+def get_supported_currencies():
+    """
+    Returns a list of supported currencies.
+    """
+    return ["USD", "EUR", "GBP", "JPY"]
