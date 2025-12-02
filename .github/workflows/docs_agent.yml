@@ -38,63 +38,78 @@ jobs:
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
       # ========================================================
-      # 🆕 ЧАСТЬ 1: ГЕНЕРАЦИЯ ОПИСАНИЯ ПУЛ-РЕКВЕСТА
+      # 📝 ЧАСТЬ 1: ГЕНЕРАЦИЯ UPDATE ДЛЯ PR
       # ========================================================
-      - name: 3. Generate PR Description
-        id: pr_gen
+      - name: 3. Generate PR Update
+        id: pr_desc_gen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           cat <<'EOF_PROMPT' > pr_prompt.txt
-          # TASK: PR DESCRIPTION WRITER
-          Generate a professional Pull Request description based on the code diff.
+          # TASK: PR UPDATE WRITER
+          Generate a short update block for the Pull Request description.
           
           # OUTPUT FORMAT (Markdown):
-          ## 🚀 Summary
-          [1 sentence summary]
+          ### 🔄 Update ({{DATE}})
+          * [What changed in this specific commit?]
+          * [Key technical detail]
           
-          ## 🛠 Key Changes
-          * [Bullet point]
-          * [Bullet point]
-          
-          ## 🧪 Testing
-          [How to test these changes]
-          
-          # RULES:
-          * Keep it concise.
-          * Use emojis.
-          * Output ONLY the markdown.
+          # RULE:
+          Keep it very short (bullet points only).
           EOF_PROMPT
+          
+          # Вставляем текущую дату в промпт
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M')
+          sed -i "s/{{DATE}}/$CURRENT_DATE/g" pr_prompt.txt
 
           jq -n \
             --rawfile diff pr_diff.txt \
             --rawfile prompt pr_prompt.txt \
-            '{ contents: [{ parts: [{ text: ($prompt + "\n\n## CODE DIFF:\n" + $diff) }] }] }' > pr_payload.json
+            '{ contents: [{ parts: [{ text: ($prompt + "\n\n## LATEST CODE DIFF:\n" + $diff) }] }] }' > pr_payload.json
 
           curl -s -H "Content-Type: application/json" \
                -d @pr_payload.json \
                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
 
-          jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_desc.md
+          jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_update_block.md
 
-      - name: 4. Update PR Body
+      - name: 4. Append to PR Body (Накопительный режим)
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
-            if (!fs.existsSync('pr_desc.md')) return;
-            const newBody = fs.readFileSync('pr_desc.md', 'utf8');
+            if (!fs.existsSync('pr_update_block.md')) return;
             
-            // ОБНОВЛЯЕМ ОПИСАНИЕ PR (ШАПКУ)
+            const newBlock = fs.readFileSync('pr_update_block.md', 'utf8');
+            
+            // 1. Получаем текущее описание PR
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            let currentBody = pr.body || "";
+            
+            // 2. Если это первый запуск (пусто), добавляем заголовок
+            if (!currentBody.includes("## 🚀 AI Summary Log")) {
+               currentBody = "## 🚀 AI Summary Log\n" + currentBody;
+            }
+            
+            // 3. Добавляем новый блок СВЕРХУ (чтобы свежее было видно сразу)
+            // Мы вставляем его после заголовка
+            const updatedBody = currentBody.replace("## 🚀 AI Summary Log", "## 🚀 AI Summary Log\n\n" + newBlock);
+            
+            // 4. Обновляем PR
             await github.rest.pulls.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
-              body: newBody
+              body: updatedBody
             });
 
       # ========================================================
-      # 🔄 ЧАСТЬ 2: ГЕНЕРАЦИЯ README (КАК И РАНЬШЕ)
+      # 🔄 ЧАСТЬ 2: ГЕНЕРАЦИЯ README (БЕЗ ИЗМЕНЕНИЙ)
       # ========================================================
       - name: 5. Generate README
         id: readme_gen
@@ -135,7 +150,6 @@ jobs:
 
           sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" readme_prompt.txt
           
-          # Сборка
           jq -n \
             --arg repo "$REPO_NAME" \
             --rawfile diff pr_diff.txt \
@@ -154,7 +168,7 @@ jobs:
 
           jq -r '.candidates[0].content.parts[0].text' readme_response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
 
-      - name: 6. Decide Action (Comment/Commit)
+      - name: 6. Decide Action
         uses: actions/github-script@v6
         with:
           script: |
