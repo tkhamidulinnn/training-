@@ -31,7 +31,6 @@ jobs:
       - name: 2. Gather Data
         id: file_data
         run: |
-          # Fetch base branch safely
           git fetch origin ${{ github.base_ref }} || true
           
           MODE="${{ github.event.inputs.mode }}"
@@ -39,13 +38,11 @@ jobs:
              MODE="diff"
           fi
           
-          echo "🚀 Running in mode: $MODE"
-
           if [ "$MODE" == "diff" ]; then
              git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           elif [ "$MODE" == "full_scan" ]; then
-             find . -maxdepth 4 -not -path '*/.*' -not -path './node_modules*' | grep -E "\.(py|js|ts|go|java|md|json|yml|yaml)$" > all_files_list.txt
-             echo "FULL REPOSITORY SCAN:" > pr_diff.txt
+             find . -maxdepth 4 -not -path '*/.*' -not -path './node_modules*' | grep -E "\.(py|js|ts|go|java|md|json)$" > all_files_list.txt
+             echo "FULL SCAN" > pr_diff.txt
              while read -r file; do
                echo "--- FILE: $file ---" >> pr_diff.txt
                cat "$file" >> pr_diff.txt
@@ -63,23 +60,31 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt || true
 
+      # ========================================================
+      # 🛠 ИСПРАВЛЕНИЕ 1: ЧАСОВОЙ ПОЯС
+      # ========================================================
       - name: 3. Generate PR Description
         if: github.event_name == 'pull_request'
         id: pr_desc_gen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # ⬇️ УСТАНОВИТЕ ВАШ ЧАСОВОЙ ПОЯС (Например: Europe/Moscow, Asia/Dubai)
+          TZ: "Europe/Moscow" 
         run: |
+          # Получаем правильное время
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M')
+          
           cat <<'EOF_PROMPT' > pr_prompt.txt
-          # TASK: PR UPDATE WRITER
-          Generate a short update block for the Pull Request description.
+          # TASK: PR UPDATE LOGGER
+          Generate a short log entry for this code update.
           # OUTPUT FORMAT:
           ### 🔄 Update (__DATE__)
-          * [Bullet point 1]
-          * [Bullet point 2]
-          # RULE: Keep it very short.
+          * [Emoji] [Short bullet point about changes]
+          * [Emoji] [Another bullet point]
+          # RULE: Be concise. No intro text.
           EOF_PROMPT
           
-          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M')
+          # Безопасная вставка даты
           sed -i "s/__DATE__/$CURRENT_DATE/g" pr_prompt.txt
 
           jq -n \
@@ -93,21 +98,45 @@ jobs:
           
           jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_update_block.md
 
-      - name: 4. Update PR Body
+      # ========================================================
+      # 🛠 ИСПРАВЛЕНИЕ 2: БЕЗОПАСНОЕ ДОБАВЛЕНИЕ ИСТОРИИ
+      # ========================================================
+      - name: 4. Update PR Body (Safe Append)
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
             if (!fs.existsSync('pr_update_block.md')) return;
+            
             const newBlock = fs.readFileSync('pr_update_block.md', 'utf8');
-            const { data: pr } = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number });
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
             let currentBody = pr.body || "";
-            if (!currentBody.includes("## 🚀 AI Summary Log")) { currentBody = "## 🚀 AI Summary Log\n" + currentBody; }
-            const updatedBody = currentBody.replace("## 🚀 AI Summary Log", "## 🚀 AI Summary Log\n\n" + newBlock);
-            await github.rest.pulls.update({ owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number, body: updatedBody });
+            const LOG_HEADER = "## 🚀 AI Summary Log";
+            
+            // Если заголовка еще нет, создаем его и добавляем первую запись
+            if (!currentBody.includes(LOG_HEADER)) {
+               currentBody = LOG_HEADER + "\n\n" + newBlock + "\n\n---\n" + currentBody;
+            } 
+            else {
+               // Если заголовок есть, мы вставляем новую запись СРАЗУ ПОСЛЕ него.
+               // Старые записи сдвигаются вниз, но НЕ удаляются.
+               currentBody = currentBody.replace(LOG_HEADER, LOG_HEADER + "\n\n" + newBlock);
+            }
+            
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: currentBody
+            });
 
-      - name: 5. Generate README (Visual Upgrade)
+      - name: 5. Generate README
         id: gemini_readme
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -115,16 +144,16 @@ jobs:
         run: |
           cat <<'EOF_PROMPT' > readme_prompt.txt
           # TASK: DOCUMENTATION ARCHITECT
-          ## GOAL: Update `README.md` making it VISUALLY APPEALING and professional.
+          ## GOAL: Update `README.md` with visual polish.
           
-          ## VISUAL RULES (NEW!):
-          1. **BADGES:** Under the title, add a row of Shields.io badges for languages/tools found in code (e.g., Python, Docker, AWS). Format: `![Name](https://img.shields.io/badge/Name-Color?logo=name)`
-          2. **FILE TREE:** Create a section `## 📂 Project Structure` and render the `FILE TREE` input as a code block.
-          3. **TABLES:** In the "Installation" or "Configuration" sections, format lists as Markdown Tables (e.g., | Variable | Description | Default |).
+          ## VISUAL RULES:
+          1. **BADGES:** Add Shields.io badges under the title.
+          2. **FILE TREE:** Add `## 📂 Project Structure` section with a tree view.
+          3. **TABLES:** Use Markdown tables for Config/Env vars.
           
           ## STANDARD RULES:
-          1. **ALWAYS UPDATE:** Generate the full content.
-          2. **INTEGRATION:** Merge new features intelligently.
+          1. **ALWAYS UPDATE:** Generate full content.
+          2. **INTEGRATION:** Merge new features.
           
           ## OUTPUT FORMAT:
           Split response with "---SPLIT---".
@@ -136,10 +165,8 @@ jobs:
           ---
           **[GOLDEN_TEMPLATE]**
           # PROJECT_NAME_PH
-          [Badges Here]
-          
+          [Badges]
           [Description]
-          
           ## 1. Table of Contents
           ## 2. About The Project
           ## 📂 Project Structure
