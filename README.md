@@ -9,16 +9,19 @@
 This project provides a simple Python script for demonstrating secure transaction processing, focusing on handling sensitive configuration and data integrity through hashing, and includes an example of asynchronous task processing with Celery.
 
 ## 📂 Project Structure
-text
+
 .
+├── Dockerfile
 ├── README.md
-├── new
+├── new # Celery tasks module (new.py)
 └── test file 1
 
 
 ## 1. Table of Contents
 *   [2. About The Project](#2-about-the-project)
 *   [3. Installation](#3-installation)
+    *   [3.1. Dependencies](#31-dependencies)
+    *   [3.2. Docker Containerization](#32-docker-containerization)
 *   [4. Usage](#4-usage)
 *   [5. Configuration](#5-configuration)
 *   [6. API Reference](#6-api-reference)
@@ -32,7 +35,7 @@ This repository contains Python scripts designed to illustrate basic principles 
 *   **Data Hashing**: Utilizes SHA256 for creating a transaction signature to ensure data integrity before transmission to a simulated secure vault.
 *   **Transaction Processing**: A function `process_secure_transaction` that simulates the encryption and sending of data.
 *   **Environment Variable Usage**: Shows how to load sensitive information from environment variables, with a fallback to default values.
-*   **Asynchronous Tasks**: An example (`new`) demonstrating background task processing using Celery and Redis, including email sending and report generation.
+*   **Asynchronous Tasks**: An example (`new.py`) demonstrating background task processing using Celery and Redis, including email sending and report generation.
 
 ## 3. Installation
 The project requires Python 3.x.
@@ -59,12 +62,26 @@ This project relies on the following external libraries:
 | `requests` | Any     | Used for making HTTP requests (e.g., to external services). |
 | `celery`   | Any     | Asynchronous task queue/job queue for background processing. |
 | `redis`    | Any     | In-memory data structure store, used as Celery's message broker and result backend. |
+| `pandas`   | Any     | (Referenced in Dockerfile) Data analysis and manipulation tool. |
+| `sqlalchemy` | Any     | (Referenced in Dockerfile) SQL toolkit and Object-Relational Mapper. |
+| `psycopg2-binary` | Any | (Referenced in Dockerfile) PostgreSQL database adapter for Python. |
+
+### 3.2. Docker Containerization
+A `Dockerfile` is provided for containerizing a related application component.
+To build the Docker image:
+bash
+docker build -t training-processor-app .
+
+To run the container (note: this will run `order_processor.py` as defined in the `Dockerfile`):
+bash
+docker run -p 80:80 -e APP_ENV=production training-processor-app
+
+*Note: The `Dockerfile` specifically targets `order_processor.py` and includes additional dependencies (`pandas`, `sqlalchemy`, `psycopg2-binary`) which are not explicitly part of the primary `process_secure_transaction` or Celery task examples detailed in this README.*
 
 ## 4. Usage
-To run the secure transaction script:
+To run the secure transaction script (assuming `123` is a Python script, e.g., `123.py`):
 bash
 python 123
-
 
 This will execute the example call to `process_secure_transaction` with predefined `user_id` and `amount`. The output will show the processing message and the generated transaction signature.
 
@@ -165,8 +182,8 @@ Heavy task that simulates the generation of a PDF report for a given month.
 ## 7. Deployment
 When deploying this project or similar components in a production environment, consider the following best practices for security and reliability:
 *   **Environment Variables & Secret Management**: Always use environment variables or a secure secret management system (e.g., AWS Secrets Manager, Azure Key Vault, HashiCorp Vault) for sensitive credentials instead of hardcoding.
-*   **Containerization**: Consider deploying applications within Docker containers for isolation, portability, and consistent environments.
-*   **Orchestration**: For scalable deployments, use container orchestration platforms like Kubernetes or Docker Swarm, especially for managing Celery workers and Redis.
+*   **Containerization**: Consider deploying applications within Docker containers for isolation, portability, and consistent environments. The provided `Dockerfile` offers a starting point for containerizing a component of this project.
+*   **Orchestration**: For scalable deployments, use container orchestration platforms like Kubernetes or Docker Swarm, especially for managing Celery workers and Redis instances.
 *   **Least Privilege**: Ensure that the execution environment and the script itself have only the minimum necessary permissions required to perform their functions.
 *   **Secure Communications**: Use TLS/SSL for all communication channels, especially when transmitting sensitive data (e.g., between application and Redis, or to external APIs).
 *   **Logging & Auditing**: Implement robust logging for transactions, task processing, and security events. Regularly audit access and transactions for suspicious activity.
