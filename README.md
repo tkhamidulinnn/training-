@@ -1,3 +1,4 @@
+**PART 2: FULL README**
 # training-secure-transaction-processor
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -63,6 +64,7 @@ This project relies on the following external libraries:
 To run the secure transaction script:
 bash
 python 123
+
 
 This will execute the example call to `process_secure_transaction` with predefined `user_id` and `amount`. The output will show the processing message and the generated transaction signature.
 
