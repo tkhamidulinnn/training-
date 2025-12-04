@@ -19,48 +19,130 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: 2. Gather Data
+      - name: 2. Gather Data (Dual Diff Strategy)
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
+          
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-            git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
+            # 1. FULL DIFF (For README)
+            git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > full_pr_diff.txt
+            
+            # 2. INCREMENTAL DIFF (For Change Log)
+            git diff HEAD~1 HEAD -- . ":(exclude).github" ":(exclude).gitignore" > last_commit_diff.txt
           else
-            echo "Not a PR (manual run)." > pr_diff.txt
+            echo "Manual run." > full_pr_diff.txt
+            echo "Manual run." > last_commit_diff.txt
           fi
 
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
-            echo "README.md file not found. Creating from scratch." > current_readme.txt
+            echo "README.md file not found." > current_readme.txt
           fi
           
+          # Generating file tree for context
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (Robust Mode)
-        id: gemini_call
+      # ========================================================
+      # 📝 PART 1: PR UPDATE (CHANGE LOG)
+      # ========================================================
+      - name: 3. Generate Change Log
+        id: pr_desc_gen
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TZ: "UTC"
+        run: |
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M %Z')
+          
+          cat <<EOF_PROMPT > pr_prompt.txt
+          # TASK: PR UPDATE WRITER
+          Generate a short update block for the Pull Request description based on [LAST COMMIT DIFF].
+          
+          # OUTPUT FORMAT:
+          ### 🔄 Update ($CURRENT_DATE)
+          * [Emoji] [What changed in this specific commit?]
+          * [Emoji] [Key technical detail]
+          
+          # RULE:
+          Keep it very short (bullet points only). If [LAST COMMIT DIFF] is empty, return "No significant code changes."
+          EOF_PROMPT
+
+          jq -n \
+            --rawfile diff last_commit_diff.txt \
+            --rawfile prompt pr_prompt.txt \
+            '{ contents: [{ parts: [{ text: ($prompt + "\n\n## LAST COMMIT DIFF:\n" + $diff) }] }] }' > pr_payload.json
+
+          curl -s -H "Content-Type: application/json" \
+               -d @pr_payload.json \
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > pr_response.json
+
+          jq -r '.candidates[0].content.parts[0].text' pr_response.json > pr_update_block.md
+
+      - name: 4. Append to PR Body
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('pr_update_block.md')) return;
+            
+            const newBlock = fs.readFileSync('pr_update_block.md', 'utf8');
+            
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            let currentBody = pr.body || "";
+            const HEADER = "## 🚀 AI Summary Log";
+            
+            if (!currentBody.includes(HEADER)) {
+               currentBody = HEADER + "\n\n" + newBlock + "\n\n---\n" + currentBody;
+            } else {
+               currentBody = currentBody.replace(HEADER, HEADER + "\n\n" + newBlock);
+            }
+            
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: currentBody
+            });
+
+      # ========================================================
+      # 🔄 PART 2: FULL README GENERATION (VISUAL UPGRADE)
+      # ========================================================
+      - name: 5. Generate README
+        id: gemini_readme
         env:
           REPO_NAME: ${{ github.event.repository.name }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cat <<'EOF_PROMPT' > prompt_instructions.txt
-          # TASK: DOCUMENTATION MAINTAINER
-          ## GOAL: Update `README.md` based on code changes.
+          cat <<'EOF_PROMPT' > readme_prompt.txt
+          # TASK: DOCUMENTATION ARCHITECT
+          ## GOAL: Update `README.md` to be professional and visually appealing.
           
-          ## INPUTS:
-          1. **FILE TREE:** Current files.
-          2. **DIFF:** Code changes.
-          3. **CURRENT README:** Old content.
-          
-          ## RULES:
-          1. **ALWAYS UPDATE:** Generate the full `README.md`.
-          2. **INTEGRATION:** Merge new features into the existing structure.
+          ## VISUAL STANDARDS (NEW!):
+          1. **BADGES:** Immediately under the title, generate a row of Shields.io badges for the main technologies found in the code (e.g., Python, Docker, AWS, PostgreSQL). 
+             * Format: `![Name](https://img.shields.io/badge/Name-Color?logo=name&logoColor=white)`
+          2. **PROJECT STRUCTURE:** In the "About" section, render the provided `FILE TREE` as a code block representation of the folder structure.
+          3. **TABLES:** Always use Markdown Tables for "Configuration" (Env Vars) and "Dependencies".
           
           ## GOLDEN STRUCTURE:
           ---
           **[GOLDEN_TEMPLATE]**
           # PROJECT_NAME_PH
-          [Description]
+          
+          [Badges Row]
+          
+          [Short Description]
+          
+          ## 📂 Project Structure
+          ```text
+          [Insert File Tree Here]
+          ```
+
           ## 1. Table of Contents
           ## 2. About The Project
           ## 3. Installation
@@ -71,61 +153,52 @@ jobs:
           ## 8. Roadmap
           ## 9. License
           Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
-          (License text...)
+          (Standard License Text...)
           ---
           
-          Output ONLY the Markdown content. Do NOT include any intro text like "Here is the readme".
+          ## OUTPUT FORMAT:
+          Split response with "---SPLIT---".
+          **PART 1: CHANGE LOG** (Summary of changes in this PR)
+          ---SPLIT---
+          **PART 2: FULL README** (The markdown content)
           EOF_PROMPT
 
+          sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" readme_prompt.txt
+          
           jq -n \
             --arg repo "$REPO_NAME" \
-            --rawfile diff pr_diff.txt \
+            --rawfile diff full_pr_diff.txt \
             --rawfile readme current_readme.txt \
             --rawfile filetree file_tree.txt \
-            --rawfile prompt prompt_instructions.txt \
+            --rawfile prompt readme_prompt.txt \
             '{
               contents: [{
                 parts: [{
-                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## CURRENT FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## PR DIFF:\n" + $diff + "\n---")
+                  text: ($prompt + "\n\n## FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## FULL PR DIFF:\n" + $diff)
                 }]
               }]
-            }' > payload.json
+            }' > readme_payload.json
 
-          curl -s -H "Content-Type: application/json" \
-               -d @payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
+          curl -s -H "Content-Type: application/json" -d @readme_payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > readme_response.json
 
-          if jq -e '.error' response.json > /dev/null; then
-            echo "Error returned from API:"
-            cat response.json
-            exit 1
-          fi
+          jq -r '.candidates[0].content.parts[0].text' readme_response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
 
-          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
-
-          if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
-             echo "Error: API returned empty."
-             exit 1
-          fi
-
-      - name: 4. Decide Action (Simplified View)
+      - name: 6. Decide Action
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
+            if (!fs.existsSync('gemini_output.txt')) return;
+            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
             
-            if (!fs.existsSync('gemini_output.txt')) {
-               console.log("Error: Output file not found.");
-               return;
-            }
-            
-            const output = fs.readFileSync('gemini_output.txt', 'utf8');
-            
-            // Если текст слишком короткий (меньше 50 символов), значит что-то пошло не так
-            if (output.length < 50) {
-               console.log("Error: Output is too short, probably failed generation.");
-               console.log(output);
-               return; 
+            const separator = "---SPLIT---";
+            let summary = "Documentation updated.";
+            let readmeContent = fullOutput;
+
+            if (fullOutput.includes(separator)) {
+               const parts = fullOutput.split(separator);
+               summary = parts[0].trim();
+               readmeContent = parts[1].trim();
             }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
@@ -133,27 +206,26 @@ jobs:
 
             if (shouldCommit) {
               console.log("LABEL FOUND! Writing file...");
-              fs.writeFileSync('README.md', output);
+              fs.writeFileSync('README.md', readmeContent);
             } else {
-              console.log("No label found. Posting comment.");
+              console.log("Updating comment...");
+              const header = "🤖 **Documentation Agent**";
+              const body = `${header}\n\n### 📝 Change Log (Latest):\n${summary}\n\n---\n👉 **Apply?** Add label **\`generate-readme\`**.\n\n<details><summary>👀 View README Preview</summary>\n\`\`\`markdown\n${readmeContent}\n\`\`\`\n</details>`;
               
-              // Простая и надежная структура комментария
-              const body = "🤖 **Documentation Agent**\n\n" +
-                           "Я подготовил обновление документации.\n\n" +
-                           "👉 **Чтобы применить изменения:** Поставьте метку **`generate-readme`**.\n\n" +
-                           "<details><summary>👀 Посмотреть полный код README.md</summary>\n\n" +
-                           "```markdown\n" + output + "\n```\n" +
-                           "</details>";
-              
-              github.rest.issues.createComment({
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: body
               });
+              const botComment = comments.find(c => c.body.includes(header));
+              if (botComment) {
+                await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: botComment.id, body: body });
+              } else {
+                await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: body });
+              }
             }
 
-      - name: 5. Commit Changes
+      - name: 7. Commit Changes
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"

@@ -1,0 +1,9 @@
+
+
+---
+## Recent Changes
+- Migrated from Basic Auth to JWT (Security upgrade).
+- Updated API examples.
+
+---
+*Copyright © 2024 Grid Dynamics. All rights reserved.*
