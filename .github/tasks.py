@@ -1,0 +1,52 @@
+import os
+import time
+# INSTALLATION: pip install celery redis
+from celery import Celery
+
+# ==========================================
+# 🐇 CELERY CONFIGURATION
+# ==========================================
+# Broker settings for the task queue
+# ==========================================
+BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+EMAIL_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "noreply@example.com")
+
+# Initialize Celery App
+app = Celery('tasks', broker=BROKER_URL, backend=RESULT_BACKEND)
+
+@app.task(bind=True, max_retries=3)
+def send_welcome_email(self, user_id, email):
+    """
+    Background task to send onboarding emails.
+    Retries automatically on failure.
+    
+    Args:
+        user_id (int): The user's database ID.
+        email (str): Recipient email address.
+    """
+    try:
+        print(f"Processing email for user {user_id}...")
+        # Simulate SMTP delay
+        time.sleep(2) 
+        
+        print(f"📧 Sent welcome email to {email} from {EMAIL_SENDER}")
+        return {"status": "sent", "recipient": email}
+        
+    except Exception as exc:
+        print(f"Failed to send email: {exc}")
+        # Retry in 60 seconds
+        raise self.retry(exc=exc, countdown=60)
+
+@app.task
+def generate_monthly_report(month):
+    """
+    Heavy task: Generates PDF report for the given month.
+    """
+    print(f"Generating report for {month}...")
+    time.sleep(5) # Simulate heavy work
+    return f"/tmp/report_{month}.pdf"
+
+if __name__ == "__main__":
+    # How to run this worker:
+    # celery
