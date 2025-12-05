@@ -23,18 +23,22 @@ jobs:
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
+          
+          # 1. Collect Diff
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
             echo "Not a PR (manual run)." > pr_diff.txt
           fi
 
+          # 2. Collect Current README
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
             echo "README.md file not found." > current_readme.txt
           fi
           
+          # 3. Collect File Structure
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
       - name: 3. Call Gemini API
@@ -50,17 +54,22 @@ jobs:
           ## RULES:
           1. **ALWAYS UPDATE:** Generate the full `README.md`.
           2. **INTEGRATION:** Merge new features into the existing structure.
+          3. **FORMAT:** Use clear Markdown.
           
           ## OUTPUT FORMAT:
-          Split response with "---SPLIT---".
-          **PART 1: CHANGE LOG** (Bulleted list of changes with emojis)
-          ---SPLIT---
-          **PART 2: FULL README** (The markdown content)
+          You MUST split the output into two parts separated by "---SPLIT---".
           
-          ## GOLDEN STRUCTURE:
+          **PART 1: CHANGE LOG** - A concise bulleted list of what changed.
+          - Group by filename using emoji (e.g., 📂 `src/main.js`).
+          
+          ---SPLIT---
+          
+          **PART 2: FULL README**
+          - The complete, updated Markdown content of the README.md file.
+          
+          ## GOLDEN STRUCTURE (Follow this structure):
           ---
-          **[GOLDEN_TEMPLATE]**
-          # PROJECT_NAME_PH
+          # [Project Name]
           [Description]
           ## 1. Table of Contents
           ## 2. About The Project
@@ -72,7 +81,6 @@ jobs:
           ## 8. Roadmap
           ## 9. License
           Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
-          (Standard License Text...)
           ---
           EOF_PROMPT
 
@@ -87,7 +95,8 @@ jobs:
 
           jq -n --rawfile prompt prompt_instructions.txt '{ contents: [{ parts: [{ text: $prompt }] }] }' > payload.json
 
-          curl -s -H "Content-Type: application/json" -d @payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
+          # Using gemini-1.5-flash as it is the most stable current model
+          curl -s -H "Content-Type: application/json" -d @payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
 
           jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
 
@@ -116,17 +125,17 @@ jobs:
               console.log("LABEL FOUND! Preparing to commit...");
               fs.writeFileSync('README.md', readmeContent);
             } else {
-              // ОБНОВЛЕНИЕ КОММЕНТАРИЯ (Вместо спама новыми)
+              // UPDATE COMMENT LOGIC
               const header = "🤖 **Documentation Agent**";
               const body = `${header}\n\n` +
-                           `### 📝 Последние изменения (Change Log):\n` +
+                           `### 📝 Latest Changes Analysis:\n` +
                            `${summary}\n\n` +
                            `--- \n` +
-                           `👉 **Чтобы применить:** Поставьте метку **\`generate-readme\`**.\n\n` +
-                           `<details><summary>👀 Посмотреть полный README.md</summary>\n\n` +
+                           `👉 **To apply this update:** Add label **\`generate-readme\`** to this PR.\n\n` +
+                           `<details><summary>👀 <strong>Preview Full README</strong> (Click to expand)</summary>\n\n` +
                            `\`\`\`markdown\n${readmeContent}\n\`\`\`\n` +
                            `</details>\n` +
-                           `\n_Updated at: ${new Date().toISOString()}_`;
+                           `\n_Last analysis: ${new Date().toISOString()}_`;
               
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
@@ -153,17 +162,26 @@ jobs:
               }
             }
 
-      - name: 5. Commit Changes (Only if changed)
+      - name: 5. Commit Changes (Safe Push)
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
           git config --global user.email "actions@github.com"
+          
+          # Stage the new README
           git add README.md
+          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "docs: auto-update README.md [skip ci]"
-            git push
+            
+            # CRITICAL FIX: Pull remote changes (rebase) before pushing
+            # This prevents the "lost file" or "rejected push" issue
+            git pull origin ${{ github.event.pull_request.head.ref }} --rebase --autostash
+            
+            # Push specifically to the PR branch
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
           fi
 
       - name: 6. Always Remove Label
@@ -171,7 +189,6 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // УДАЛЯЕМ МЕТКУ В ЛЮБОМ СЛУЧАЕ (Даже если коммита не было)
             console.log("Cleaning up label...");
             try {
               await github.rest.issues.removeLabel({
@@ -181,5 +198,5 @@ jobs:
                 name: 'generate-readme'
               });
             } catch (e) {
-              console.log("Label already removed or not found.");
+              console.log("Label already removed.");
             }
