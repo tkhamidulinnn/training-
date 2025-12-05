@@ -1,3 +1,4 @@
+**PART 2: FULL README**
 # training-secure-transaction-processor
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -13,7 +14,7 @@ This project provides a collection of Python scripts demonstrating secure transa
 ├── Dockerfile
 ├── README.md
 ├── health_monitor.py
-├── new.py # Celery tasks module
+├── new # Celery tasks module (interpreted as new.py)
 └── weather_api.py
 
 
@@ -35,7 +36,7 @@ This repository contains Python scripts designed to illustrate basic principles 
 *   **Data Hashing**: Utilizes SHA256 for creating a transaction signature to ensure data integrity before transmission to a simulated secure vault.
 *   **Transaction Processing**: A function `process_secure_transaction` that simulates the encryption and sending of data.
 *   **Environment Variable Usage**: Shows how to load sensitive information from environment variables, with a fallback to default values.
-*   **Asynchronous Tasks**: An example (`new.py`) demonstrating background task processing using Celery and Redis, including email sending and report generation.
+*   **Asynchronous Tasks**: An example (`new`) demonstrating background task processing using Celery and Redis, including email sending and report generation.
 *   **System Health Monitoring**: A script (`health_monitor.py`) to continuously monitor CPU and memory usage, with configurable thresholds and webhook alerts for critical conditions.
 *   **External API Integration (Weather)**: A module (`weather_api.py`) for fetching current weather data from the OpenWeatherMap API, demonstrating integration with external services.
 
