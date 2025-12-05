@@ -25,12 +25,10 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-            # 1. ПОЛНЫЙ ДИФФ (Для генерации полного README)
-            # Показывает разницу между веткой и main (все изменения PR)
+            # 1. ПОЛНЫЙ ДИФФ (Для README)
             git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > full_pr_diff.txt
             
             # 2. ИНКРЕМЕНТАЛЬНЫЙ ДИФФ (Для Change Log)
-            # Показывает только то, что изменилось в ПОСЛЕДНЕМ коммите
             git diff HEAD~1 HEAD -- . ":(exclude).github" ":(exclude).gitignore" > last_commit_diff.txt
           else
             echo "Manual run." > full_pr_diff.txt
@@ -45,7 +43,7 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (Smart Logs)
+      - name: 3. Call Gemini API (No Diagrams, No Tables)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -55,23 +53,34 @@ jobs:
           # TASK: DOCUMENTATION MAINTAINER
           
           ## INPUTS:
-          1. **LAST COMMIT DIFF:** Use this for the "CHANGE LOG" only. Focus on what JUST happened.
-          2. **FULL PR DIFF:** Use this to understand the WHOLE project state for the "README".
+          1. **LAST COMMIT DIFF:** Use this for the "CHANGE LOG".
+          2. **FULL PR DIFF:** Use this for the "README".
           3. **CURRENT README:** Old content.
           
           ## GOAL:
-          Generate a specific Change Log for the latest commit AND a fully updated README for the whole project.
+          Generate a specific Change Log and a fully updated README.
+          
+          ## RULES (CRITICAL):
+          1. **ALWAYS UPDATE:** Generate the full `README.md`.
+          2. **INTEGRATION:** Merge new features into the existing structure.
+          3. **NO VISUALIZATIONS:**
+             - **NO ASCII FILE TREES.** Do NOT draw the folder structure.
+             - **NO BADGES.** Do not add status shields.
+             - **NO "PROJECT STRUCTURE" SECTION.** Skip this section entirely.
+          4. **NO TABLES:**
+             - **Do NOT use Markdown tables** (rows/columns).
+             - Use bullet points or lists for all data presentation.
           
           ## OUTPUT FORMAT:
           Split response with "---SPLIT---".
           
           **PART 1: CHANGE LOG**
-          (Bulleted list describing ONLY changes found in [LAST COMMIT DIFF]. Be specific, e.g. "Added get_currencies function").
+          (Bulleted list describing ONLY changes found in [LAST COMMIT DIFF]. Be specific.)
           
           ---SPLIT---
           
           **PART 2: FULL README**
-          (The complete documentation covering EVERYTHING in [FULL PR DIFF] and [FILE TREE]).
+          (The complete documentation covering EVERYTHING).
           
           ## GOLDEN STRUCTURE:
           ---
@@ -94,7 +103,6 @@ jobs:
 
           sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" prompt_instructions.txt
           
-          # СБОРКА КОНТЕКСТА
           jq -n \
             --arg repo "$REPO_NAME" \
             --rawfile last_commit last_commit_diff.txt \
@@ -105,14 +113,15 @@ jobs:
             '{
               contents: [{
                 parts: [{
-                  text: ($prompt + "\n\n## [LAST COMMIT DIFF] (For Change Log):\n" + $last_commit + "\n\n## [FULL PR DIFF] (For README):\n" + $full_diff + "\n\n## CURRENT README:\n" + $readme + "\n\n## FILE TREE:\n" + $filetree)
+                  text: ($prompt + "\n\n## [LAST COMMIT DIFF] (For Change Log):\n" + $last_commit + "\n\n## [FULL PR DIFF] (For README):\n" + $full_diff + "\n\n## CURRENT README:\n" + $readme + "\n\n## FILE TREE (CONTEXT ONLY - DO NOT DRAW):\n" + $filetree)
                 }]
               }]
             }' > payload.json
 
+          # Используем 1.5-flash
           curl -s -H "Content-Type: application/json" \
                -d @payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
 
           if jq -e '.error' response.json > /dev/null; then
             echo "Error returned from API:"
