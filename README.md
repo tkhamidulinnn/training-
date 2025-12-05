@@ -1,4 +1,3 @@
-**PART 2: FULL README**
 # training-secure-transaction-processor
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -45,12 +44,10 @@ The project requires Python 3.x.
     git clone https://github.com/your-org/training-secure-transaction-processor.git
     cd training-secure-transaction-processor
     
-
 2.  Install the required Python packages:
     ```bash
     pip install requests celery redis
     
-
 3.  Ensure a Redis server is running, as it's used by Celery for brokering tasks and storing results. You can typically run Redis via Docker or directly install it on your system.
 
 ### 3.1. Dependencies
@@ -69,20 +66,20 @@ This project relies on the following external libraries:
 ### 3.2. Docker Containerization
 A `Dockerfile` is provided for containerizing a related application component.
 To build the Docker image:
-bash
+```bash
 docker build -t training-processor-app .
-
+```
 To run the container (note: this will run `order_processor.py` as defined in the `Dockerfile`):
-bash
+```bash
 docker run -p 80:80 -e APP_ENV=production training-processor-app
-
+```
 *Note: The `Dockerfile` specifically targets `order_processor.py` and includes additional dependencies (`pandas`, `sqlalchemy`, `psycopg2-binary`) which are not explicitly part of the primary `process_secure_transaction` or Celery task examples detailed in this README.*
 
 ## 4. Usage
 To run the secure transaction script (assuming `123` is a Python script, e.g., `123.py`):
-bash
+```bash
 python 123
-
+```
 This will execute the example call to `process_secure_transaction` with predefined `user_id` and `amount`. The output will show the processing message and the generated transaction signature.
 
 To use the Celery example (assuming the file `new` is `new.py`):
@@ -90,7 +87,7 @@ To use the Celery example (assuming the file `new` is `new.py`):
 1.  Start a Celery worker in a dedicated terminal:
     ```bash
     celery -A new worker --loglevel=info
-    
+    ```
     (Note: If `new` is not directly importable as a Python module, you might need to adjust the command, e.g., `celery -A your_app_name worker --loglevel=info` if `new.py` defines the app.)
 
 2.  In a separate Python interpreter or script, trigger tasks:
@@ -108,7 +105,7 @@ To use the Celery example (assuming the file `new` is `new.py`):
     # You can check the status and result later (e.g., in a web app)
     # print(email_task.status)
     # print(email_task.result)
-    
+    ```
 
 ## 5. Configuration
 The scripts rely on several configuration variables, some of which are sensitive. **It is highly recommended to manage these securely, preferably through environment variables or a dedicated secret management system, and avoid hardcoding them directly in production environments.**
@@ -123,7 +120,7 @@ The scripts rely on several configuration variables, some of which are sensitive
 | `EMAIL_SENDER`          | Default sender email address for system notifications in the Celery email task.                         | `MAIL_DEFAULT_SENDER`     | `noreply@example.com`              |
 
 **Example for setting environment variables (before running the script or starting the Celery worker):**
-bash
+```bash
 export DB_URL="postgres://user:secret@your_db_host:5432/production_db"
 export API_KEY_V1="sk_live_YOUR_ACTUAL_API_KEY"
 export ADMIN_PASSWORD="your-strong-admin-password"
@@ -134,7 +131,7 @@ export MAIL_DEFAULT_SENDER="admin@yourdomain.com"
 # Then run your script or start your Celery worker
 # python 123
 # celery -A new worker --loglevel=info
-
+```
 
 ## 6. API Reference
 ### `process_secure_transaction(user_id, amount)`
