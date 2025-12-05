@@ -1,0 +1,35 @@
+/**
+ * Simple Currency Converter Module
+ * Handles basic conversion between major currencies.
+ */
+
+const EXCHANGE_RATES = {
+    'USD': 1.0,
+    'EUR': 0.92,
+    'GBP': 0.79,
+    'JPY': 150.50
+};
+
+class CurrencyConverter {
+    /**
+     * Converts amount from one currency to another.
+     * @param {number} amount - The amount to convert.
+     * @param {string} fromCurrency - The source currency code (e.g., 'USD').
+     * @param {string} toCurrency - The target currency code (e.g., 'EUR').
+     * @returns {number} - The converted amount.
+     */
+    static convert(amount, fromCurrency, toCurrency) {
+        if (!EXCHANGE_RATES[fromCurrency] || !EXCHANGE_RATES[toCurrency]) {
+            throw new Error('Invalid currency code.');
+        }
+
+        const amountInUSD = amount / EXCHANGE_RATES[fromCurrency];
+        return parseFloat((amountInUSD * EXCHANGE_RATES[toCurrency]).toFixed(2));
+    }
+
+    static getSupportedCurrencies() {
+        return Object.keys(EXCHANGE_RATES);
+    }
+}
+
+module.exports = CurrencyConverter;
