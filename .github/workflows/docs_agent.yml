@@ -1,4 +1,4 @@
-name: 🤖 Documentation Agent (Legacy v35)
+name: 🤖 Documentation Agent (v36.0 - Robust Legacy)
 
 on:
   pull_request:
@@ -24,29 +24,29 @@ jobs:
         run: |
           git fetch origin ${{ github.base_ref }}
           
-          # Собираем Diff
+          # 1. Diff
           if [ "${{ github.event_name }}" == "pull_request" ]; then
              git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
              echo "Manual Run" > pr_diff.txt
           fi
 
-          # Читаем текущий README
+          # 2. Current README
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
             echo "No README found." > current_readme.txt
           fi
 
-      - name: 3. Call Gemini API (Simple Mode)
+      - name: 3. Call Gemini API
         id: gemini_call
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          # Простой промпт без сложной логики разделения
+          # Простой и надежный промпт
           cat <<'EOF_PROMPT' > prompt.txt
           Role: Technical Writer.
-          Task: Update the README.md based on the code changes (DIFF).
+          Task: Update the README.md based on the code changes.
           
           Input 1 (Current README):
           (See below)
@@ -56,8 +56,8 @@ jobs:
           
           Instruction:
           Return ONLY the full updated README.md markdown content. 
-          Do not include chat or explanations. 
-          Just the file content.
+          Do not include chat, formatting blocks like ```markdown, or explanations. 
+          Just the raw markdown content.
           EOF_PROMPT
           
           cat prompt.txt > full_input.txt
@@ -68,35 +68,42 @@ jobs:
 
           jq -n --rawfile text full_input.txt '{ contents: [{ parts: [{ text: $text }] }] }' > payload.json
           
+          # Отправка запроса с обработкой ошибок
           curl -s -H "Content-Type: application/json" \
             -d @payload.json \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" \
+            "[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY)" \
             > response.json
           
-          # Парсим ответ
-          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_response.txt
+          # Парсинг с защитой от пустоты
+          jq -r '.candidates[0].content.parts[0].text // empty' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_response.txt
 
-      - name: 4. Process (Comment or Commit)
+      - name: 4. Process Logic (Safe Check)
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
             if (!fs.existsSync('gemini_response.txt')) return;
             
-            const newReadme = fs.readFileSync('gemini_response.txt', 'utf8');
+            const newReadme = fs.readFileSync('gemini_response.txt', 'utf8').trim();
             
-            // Проверяем метку
+            // --- ЗАЩИТА V36 ---
+            // Если текст пустой или слишком короткий, значит произошла ошибка API.
+            // Мы НЕ записываем файл, чтобы не испортить репозиторий.
+            if (!newReadme || newReadme.length < 50) {
+                console.log("❌ ERROR: Gemini returned invalid/empty content. Aborting.");
+                console.log("Debug Info:", newReadme);
+                return; 
+            }
+
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
             
             if (labels.includes('generate-readme')) {
-                // Если есть метка - пишем в файл
-                console.log("Label found. Updating file.");
+                console.log("✅ Label found. Updating file on disk.");
                 fs.writeFileSync('README.md', newReadme);
             } else {
-                // Если метки нет - пишем комментарий
-                console.log("No label. Posting comment.");
-                const body = `🤖 **Suggested Documentation Update**\n\n` +
-                             `To apply this change, add the label \`generate-readme\`.\n\n` +
+                console.log("ℹ️ No label. Posting preview comment.");
+                const body = `🤖 **Documentation Preview (v36)**\n\n` +
+                             `To apply this update, add label \`generate-readme\`.\n\n` +
                              `<details><summary>📄 **View Generated README**</summary>\n\n` +
                              `\`\`\`markdown\n${newReadme}\n\`\`\`\n` +
                              `</details>`;
@@ -109,21 +116,27 @@ jobs:
                 });
             }
 
-      - name: 5. Commit & Push (Simple)
+      - name: 5. Commit & Push (With Rebase Fix)
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
           git config --global user.email "actions@github.com"
           
           git add README.md
+          
           if git diff --staged --quiet; then
             echo "No changes."
           else
             git commit -m "docs: update README.md"
-            git push
+            
+            # --- ВАЖНОЕ ИСПРАВЛЕНИЕ V36 ---
+            # Перед отправкой забираем изменения из ветки, чтобы не было конфликтов
+            git pull origin ${{ github.event.pull_request.head.ref }} --rebase --autostash
+            
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
           fi
-          
-      - name: 6. Remove Label
+
+      - name: 6. Cleanup Label
         if: always() && contains(github.event.pull_request.labels.*.name, 'generate-readme')
         uses: actions/github-script@v6
         with:
