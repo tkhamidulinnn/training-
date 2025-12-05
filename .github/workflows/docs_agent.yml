@@ -43,7 +43,7 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (Fixed Model)
+      - name: 3. Call Gemini API (Model: gemini-1.5-flash)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -68,8 +68,7 @@ jobs:
              - **NO BADGES.** Do not add status shields.
              - **NO "PROJECT STRUCTURE" SECTION.** Skip this section entirely.
           4. **NO TABLES:**
-             - **Do NOT use Markdown tables** (rows/columns).
-             - Use bullet points or lists for all data presentation.
+             - **Do NOT use Markdown tables.** Use lists only.
           
           ## OUTPUT FORMAT:
           Split response with "---SPLIT---".
@@ -113,54 +112,12 @@ jobs:
             '{
               contents: [{
                 parts: [{
-                  text: ($prompt + "\n\n## [LAST COMMIT DIFF] (For Change Log):\n" + $last_commit + "\n\n## [FULL PR DIFF] (For README):\n" + $full_diff + "\n\n## CURRENT README:\n" + $readme + "\n\n## FILE TREE (CONTEXT ONLY - DO NOT DRAW):\n" + $filetree)
+                  text: ($prompt + "\n\n## [LAST COMMIT DIFF] (For Change Log):\n" + $last_commit + "\n\n## [FULL PR DIFF] (For README):\n" + $full_diff + "\n\n## CURRENT README:\n" + $readme + "\n\n## FILE TREE (CONTEXT ONLY):\n" + $filetree)
                 }]
               }]
             }' > payload.json
 
-          # ИСПРАВЛЕНО: Используем gemini-1.5-flash-latest вместо gemini-1.5-flash
+          # --- МОДЕЛЬ: gemini-1.5-flash ---
           curl -s -H "Content-Type: application/json" \
                -d @payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY" > response.json
-
-          if jq -e '.error' response.json > /dev/null; then
-            echo "Error returned from API:"
-            cat response.json
-            exit 1
-          fi
-
-          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
-
-          if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
-             echo "Error: API returned empty."
-             exit 1
-          fi
-
-      - name: 4. Decide Action
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            if (!fs.existsSync('gemini_output.txt')) return;
-            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
-            
-            const separator = "---SPLIT---";
-            let summary = "Documentation updated.";
-            let readmeContent = fullOutput;
-
-            if (fullOutput.includes(separator)) {
-               const parts = fullOutput.split(separator);
-               summary = parts[0].trim();
-               readmeContent = parts[1].trim();
-            }
-
-            const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
-            const shouldCommit = labels.includes('generate-readme');
-
-            if (shouldCommit) {
-              console.log("LABEL FOUND! Writing file...");
-              fs.writeFileSync('README.md', readmeContent);
-            } else {
-              console.log("Updating comment...");
-              const header = "🤖 **Documentation Agent**";
-              const body = `${header}\n\n### 📝 Что изменилось в
+               "https://generativelanguage
