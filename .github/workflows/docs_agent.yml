@@ -1,4 +1,4 @@
-name: 🤖 Documentation Agent (v42 - Full Features)
+name: 🤖 Documentation Agent (Gemini)
 
 on:
   pull_request:
@@ -23,147 +23,147 @@ jobs:
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
-          
-          # Собираем Diff
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-             git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
+            git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
-             echo "Manual Run" > pr_diff.txt
+            echo "Not a PR (manual run)." > pr_diff.txt
           fi
 
-          # Читаем README
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
-            echo "No README found." > current_readme.txt
+            echo "README.md file not found. Creating from scratch." > current_readme.txt
           fi
+          
+          git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (Smart Split)
+      - name: 3. Call Gemini API (Robust Mode)
         id: gemini_call
         env:
+          REPO_NAME: ${{ github.event.repository.name }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          # Чистим ключ на всякий случай
-          CLEAN_KEY=$(echo "$GEMINI_API_KEY" | tr -d '[:space:]')
-
-          # Промпт просит разделить ответ на две части: ЛОГ и ПОЛНЫЙ ТЕКСТ
-          cat <<'EOF_PROMPT' > prompt.txt
-          Role: Technical Writer.
-          Task: Analyze code changes and update README.md.
+          cat <<'EOF_PROMPT' > prompt_instructions.txt
+          # TASK: DOCUMENTATION MAINTAINER
+          ## GOAL: Update `README.md` based on code changes.
           
-          Input 1 (Current README):
-          (See below)
+          ## INPUTS:
+          1. **FILE TREE:** Current files.
+          2. **DIFF:** Code changes.
+          3. **CURRENT README:** Old content.
           
-          Input 2 (Code Changes):
-          (See below)
+          ## RULES:
+          1. **ALWAYS UPDATE:** Generate the full `README.md`.
+          2. **INTEGRATION:** Merge new features into the existing structure.
           
-          OUTPUT FORMAT:
-          You must split your response into two parts using the separator "---SPLIT---".
+          ## GOLDEN STRUCTURE:
+          ---
+          **[GOLDEN_TEMPLATE]**
+          # PROJECT_NAME_PH
+          [Description]
+          ## 1. Table of Contents
+          ## 2. About The Project
+          ## 3. Installation
+          ## 4. Usage
+          ## 5. Configuration
+          ## 6. API Reference
+          ## 7. Deployment
+          ## 8. Roadmap
+          ## 9. License
+          Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
+          (License text...)
+          ---
           
-          PART 1: Change Log.
-          A bulleted list of changes grouped by filename (e.g., 📂 filename).
-          
-          ---SPLIT---
-          
-          PART 2: Full README.
-          The complete, updated markdown content of the README.md file.
+          Output ONLY the Markdown content. Do NOT include any intro text like "Here is the readme".
           EOF_PROMPT
-          
-          cat prompt.txt > full_input.txt
-          echo -e "\n\n=== CURRENT README ===\n" >> full_input.txt
-          cat current_readme.txt >> full_input.txt
-          echo -e "\n\n=== DIFF ===\n" >> full_input.txt
-          cat pr_diff.txt >> full_input.txt
 
-          jq -n --rawfile text full_input.txt '{ contents: [{ parts: [{ text: $text }] }] }' > payload.json
-          
-          # Отправка запроса
+          jq -n \
+            --arg repo "$REPO_NAME" \
+            --rawfile diff pr_diff.txt \
+            --rawfile readme current_readme.txt \
+            --rawfile filetree file_tree.txt \
+            --rawfile prompt prompt_instructions.txt \
+            '{
+              contents: [{
+                parts: [{
+                  text: ($prompt | sub("PROJECT_NAME_PH"; $repo) + "\n\n## CURRENT FILE TREE:\n" + $filetree + "\n\n## CURRENT README:\n" + $readme + "\n\n## PR DIFF:\n" + $diff + "\n---")
+                }]
+              }]
+            }' > payload.json
+
           curl -s -H "Content-Type: application/json" \
-            -d @payload.json \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$CLEAN_KEY" \
-            > response.json
-          
-          # Сохраняем ответ
-          jq -r '.candidates[0].content.parts[0].text // empty' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_full_response.txt
+               -d @payload.json \
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
 
-      - name: 4. Process & Comment
+          if jq -e '.error' response.json > /dev/null; then
+            echo "Error returned from API:"
+            cat response.json
+            exit 1
+          fi
+
+          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
+
+          if [ ! -s gemini_output.txt ] || grep -q "null" gemini_output.txt; then
+             echo "Error: API returned empty."
+             exit 1
+          fi
+
+      - name: 4. Decide Action (Simplified View)
         uses: actions/github-script@v6
         with:
           script: |
             const fs = require('fs');
-            if (!fs.existsSync('gemini_full_response.txt')) return;
             
-            const fullResponse = fs.readFileSync('gemini_full_response.txt', 'utf8');
-            
-            // Разделяем ответ на Лог и Файл
-            const separator = "---SPLIT---";
-            let changeLog = "Updates detected.";
-            let newReadme = fullResponse;
-
-            if (fullResponse.includes(separator)) {
-               const parts = fullResponse.split(separator);
-               changeLog = parts[0].trim(); // Лог для комментария
-               newReadme = parts[1].trim(); // Файл для записи
+            if (!fs.existsSync('gemini_output.txt')) {
+               console.log("Error: Output file not found.");
+               return;
             }
             
-            // Если ответ слишком короткий (ошибка) - выходим
-            if (!newReadme || newReadme.length < 50) return;
+            const output = fs.readFileSync('gemini_output.txt', 'utf8');
+            
+            // Если текст слишком короткий (меньше 50 символов), значит что-то пошло не так
+            if (output.length < 50) {
+               console.log("Error: Output is too short, probably failed generation.");
+               console.log(output);
+               return; 
+            }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
-            
-            if (labels.includes('generate-readme')) {
-                // МЕТКА ЕСТЬ -> ПИШЕМ ФАЙЛ
-                console.log("Writing README.md");
-                fs.writeFileSync('README.md', newReadme);
+            const shouldCommit = labels.includes('generate-readme');
+
+            if (shouldCommit) {
+              console.log("LABEL FOUND! Writing file...");
+              fs.writeFileSync('README.md', output);
             } else {
-                // МЕТКИ НЕТ -> ПИШЕМ КОММЕНТАРИЙ
-                // Вот тут магия: Лог виден сразу, а полный текст скрыт
-                console.log("Posting comment");
-                
-                const body = `🤖 **Documentation Update Analysis**\n\n` +
-                             `${changeLog}\n\n` +
-                             `---\n` +
-                             `👉 **To apply:** Add label \`generate-readme\`.\n\n` +
-                             `<details><summary>📜 **Preview Full Generated README** (Click to expand)</summary>\n\n` +
-                             `\`\`\`markdown\n${newReadme}\n\`\`\`\n` +
-                             `</details>`;
-                
-                await github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: context.issue.number,
-                    body: body
-                });
+              console.log("No label found. Posting comment.");
+              
+              // Простая и надежная структура комментария
+              const body = "🤖 **Documentation Agent**\n\n" +
+                           "Я подготовил обновление документации.\n\n" +
+                           "👉 **Чтобы применить изменения:** Поставьте метку **`generate-readme`**.\n\n" +
+                           "<details><summary>👀 Посмотреть полный код README.md</summary>\n\n" +
+                           "```markdown\n" + output + "\n```\n" +
+                           "</details>";
+              
+              github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
             }
 
-      - name: 5. Commit & Push (Safe Rebase)
+      - name: 5. Commit Changes
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
           git config --global user.email "actions@github.com"
-          
           git add README.md
           if git diff --staged --quiet; then
-            echo "No changes."
+            echo "No changes to commit."
           else
             git commit -m "docs: auto-update README.md [skip ci]"
-            
-            # Rebase - чтобы не терять ваши изменения
-            git pull origin ${{ github.event.pull_request.head.ref }} --rebase --autostash
-            
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+            git push
+            curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
           fi
-
-      - name: 6. Cleanup Label
-        if: always() && contains(github.event.pull_request.labels.*.name, 'generate-readme')
-        uses: actions/github-script@v6
-        with:
-          script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: 'generate-readme'
-              });
-            } catch (e) {}
