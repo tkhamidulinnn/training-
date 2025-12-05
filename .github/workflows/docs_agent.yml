@@ -2,7 +2,7 @@ name: 🤖 Documentation Agent (Gemini)
 
 on:
   pull_request:
-    types: [opened, synchronize] # Убрали 'labeled', так как метки больше не нужны
+    types: [opened, synchronize, labeled]
   workflow_dispatch:
 
 permissions:
@@ -72,7 +72,7 @@ jobs:
           ## 8. Roadmap
           ## 9. License
           Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
-          (License text...)
+          (Standard License Text...)
           ---
           EOF_PROMPT
 
@@ -91,7 +91,7 @@ jobs:
 
           jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
 
-      - name: 4. Prepare Files (No Questions Asked)
+      - name: 4. Decide Action (Update Comment)
         uses: actions/github-script@v6
         with:
           script: |
@@ -108,49 +108,78 @@ jobs:
                summary = parts[0].trim();
                readmeContent = parts[1].trim();
             }
-            
-            // СОХРАНЯЕМ САММАРИ ДЛЯ КОММЕНТАРИЯ
-            fs.writeFileSync('pr_summary.txt', summary);
 
-            // СРАЗУ ПЕРЕЗАПИСЫВАЕМ ФАЙЛ (Без проверок меток)
-            console.log("AUTO-MODE: Writing README.md...");
-            fs.writeFileSync('README.md', readmeContent);
+            const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
+            const shouldCommit = labels.includes('generate-readme');
 
-      - name: 5. Auto-Commit & Notify
+            if (shouldCommit) {
+              console.log("LABEL FOUND! Preparing to commit...");
+              fs.writeFileSync('README.md', readmeContent);
+            } else {
+              // ОБНОВЛЕНИЕ КОММЕНТАРИЯ (Вместо спама новыми)
+              const header = "🤖 **Documentation Agent**";
+              const body = `${header}\n\n` +
+                           `### 📝 Последние изменения (Change Log):\n` +
+                           `${summary}\n\n` +
+                           `--- \n` +
+                           `👉 **Чтобы применить:** Поставьте метку **\`generate-readme\`**.\n\n` +
+                           `<details><summary>👀 Посмотреть полный README.md</summary>\n\n` +
+                           `\`\`\`markdown\n${readmeContent}\n\`\`\`\n` +
+                           `</details>\n` +
+                           `\n_Updated at: ${new Date().toISOString()}_`;
+              
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              
+              const botComment = comments.find(c => c.body.includes(header));
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: body
+                });
+              }
+            }
+
+      - name: 5. Commit Changes (Only if changed)
+        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
           git config --global user.email "actions@github.com"
-          
           git add README.md
-          
-          # Если есть изменения — коммитим сразу
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "docs: auto-update README.md [skip ci]"
             git push
-            echo "CHANGES_PUSHED=true" >> $GITHUB_ENV
           fi
 
-      - name: 6. Post Notification Comment
-        if: env.CHANGES_PUSHED == 'true'
+      - name: 6. Always Remove Label
+        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         uses: actions/github-script@v6
         with:
           script: |
-            const fs = require('fs');
-            let summary = "Documentation updated automatically.";
-            if (fs.existsSync('pr_summary.txt')) {
-               summary = fs.readFileSync('pr_summary.txt', 'utf8');
+            // УДАЛЯЕМ МЕТКУ В ЛЮБОМ СЛУЧАЕ (Даже если коммита не было)
+            console.log("Cleaning up label...");
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'generate-readme'
+              });
+            } catch (e) {
+              console.log("Label already removed or not found.");
             }
-
-            const body = "🤖 **Documentation Agent**\n\n" +
-                         "⚡ **Авто-обновление завершено!** Я обновил файл `README.md` в этом PR.\n\n" +
-                         "### 📝 Что изменилось:\n" +
-                         summary;
-            
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body
-            });
