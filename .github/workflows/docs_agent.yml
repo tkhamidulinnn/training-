@@ -32,12 +32,12 @@ jobs:
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
-            echo "README.md file not found." > current_readme.txt
+            echo "README.md file not found. Creating from scratch." > current_readme.txt
           fi
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API
+      - name: 3. Call Gemini API (Robust Mode)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -47,15 +47,15 @@ jobs:
           # TASK: DOCUMENTATION MAINTAINER
           ## GOAL: Update `README.md` based on code changes.
           
+          ## INPUTS:
+          1. **FILE TREE:** Current files (For context only).
+          2. **DIFF:** Code changes.
+          3. **CURRENT README:** Old content.
+          
           ## RULES:
           1. **ALWAYS UPDATE:** Generate the full `README.md`.
           2. **INTEGRATION:** Merge new features into the existing structure.
-          
-          ## OUTPUT FORMAT:
-          Split response with "---SPLIT---".
-          **PART 1: CHANGE LOG** (Bulleted list of changes with emojis)
-          ---SPLIT---
-          **PART 2: FULL README** (The markdown content)
+          3. **NO DIAGRAMS:** Do NOT generate ASCII file trees, folder structures, or "schemes". The user hates them. Text only.
           
           ## GOLDEN STRUCTURE:
           ---
@@ -72,114 +72,10 @@ jobs:
           ## 8. Roadmap
           ## 9. License
           Copyright © 2025 Grid Dynamics Holdings, Inc. All rights reserved.
-          (Standard License Text...)
+          (License text...)
           ---
+          
+          Output ONLY the Markdown content. Do NOT include any intro text like "Here is the readme".
           EOF_PROMPT
 
-          sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" prompt_instructions.txt
-          
-          echo -e "\n\n## CURRENT FILE TREE:\n" >> prompt_instructions.txt
-          cat file_tree.txt >> prompt_instructions.txt
-          echo -e "\n\n## CURRENT README:\n" >> prompt_instructions.txt
-          cat current_readme.txt >> prompt_instructions.txt
-          echo -e "\n\n## PR DIFF:\n" >> prompt_instructions.txt
-          cat pr_diff.txt >> prompt_instructions.txt
-
-          jq -n --rawfile prompt prompt_instructions.txt '{ contents: [{ parts: [{ text: $prompt }] }] }' > payload.json
-
-          curl -s -H "Content-Type: application/json" -d @payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
-
-          jq -r '.candidates[0].content.parts[0].text' response.json | sed 's/^```json//' | sed 's/^```//' | sed 's/```$//' > gemini_output.txt
-
-      - name: 4. Decide Action (Update Comment)
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            if (!fs.existsSync('gemini_output.txt')) return;
-            
-            const fullOutput = fs.readFileSync('gemini_output.txt', 'utf8');
-            const separator = "---SPLIT---";
-            let summary = "Documentation updated.";
-            let readmeContent = fullOutput;
-
-            if (fullOutput.includes(separator)) {
-               const parts = fullOutput.split(separator);
-               summary = parts[0].trim();
-               readmeContent = parts[1].trim();
-            }
-
-            const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
-            const shouldCommit = labels.includes('generate-readme');
-
-            if (shouldCommit) {
-              console.log("LABEL FOUND! Preparing to commit...");
-              fs.writeFileSync('README.md', readmeContent);
-            } else {
-              // ОБНОВЛЕНИЕ КОММЕНТАРИЯ (Вместо спама новыми)
-              const header = "🤖 **Documentation Agent**";
-              const body = `${header}\n\n` +
-                           `### 📝 Последние изменения (Change Log):\n` +
-                           `${summary}\n\n` +
-                           `--- \n` +
-                           `👉 **Чтобы применить:** Поставьте метку **\`generate-readme\`**.\n\n` +
-                           `<details><summary>👀 Посмотреть полный README.md</summary>\n\n` +
-                           `\`\`\`markdown\n${readmeContent}\n\`\`\`\n` +
-                           `</details>\n` +
-                           `\n_Updated at: ${new Date().toISOString()}_`;
-              
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              });
-              
-              const botComment = comments.find(c => c.body.includes(header));
-
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: body
-                });
-              } else {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.issue.number,
-                  body: body
-                });
-              }
-            }
-
-      - name: 5. Commit Changes (Only if changed)
-        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
-        run: |
-          git config --global user.name "Gemini Docs Agent"
-          git config --global user.email "actions@github.com"
-          git add README.md
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "docs: auto-update README.md [skip ci]"
-            git push
-          fi
-
-      - name: 6. Always Remove Label
-        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
-        uses: actions/github-script@v6
-        with:
-          script: |
-            // УДАЛЯЕМ МЕТКУ В ЛЮБОМ СЛУЧАЕ (Даже если коммита не было)
-            console.log("Cleaning up label...");
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: 'generate-readme'
-              });
-            } catch (e) {
-              console.log("Label already removed or not found.");
-            }
+          jq -n \
