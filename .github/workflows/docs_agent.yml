@@ -1,4 +1,4 @@
-name: 🤖 Documentation Agent (Lyra Edition v48)
+name: 🤖 Documentation Agent (Version 44.0 - Strict & Clean)
 
 on:
   pull_request:
@@ -7,12 +7,10 @@ on:
     inputs:
       mode:
         description: 'Run Mode'
-        required: true
         default: 'diff'
         type: choice
         options:
         - diff
-        - full_scan
 
 permissions:
   pull-requests: write
@@ -28,104 +26,85 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: 2. Gather Data (Smart Context)
+      - name: 2. Gather Data
         id: file_data
         run: |
           git fetch origin ${{ github.base_ref }}
           
-          # 1. Собираем DIFF (Изменения)
+          # 1. DIFF (Изменения)
           if [ "${{ github.event_name }}" == "pull_request" ]; then
              git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
              echo "Manual Run" > pr_diff.txt
           fi
 
-          # 2. Собираем КОНТЕКСТ (Структура файлов)
+          # 2. CONTEXT (Структура)
           echo "## PROJECT STRUCTURE:" > context.txt
           git ls-files --exclude-standard | grep -v "^.github/" | head -n 100 >> context.txt
           
-          # Добавляем ключевые файлы зависимостей
-          for dep_file in "requirements.txt" "package.json" "pom.xml" "go.mod"; do
-             if [ -f "$dep_file" ]; then
-                echo -e "\n## FILE: $dep_file" >> context.txt
-                cat "$dep_file" >> context.txt
-             fi
-          done
-
-          # 3. Читаем старый README
+          # 3. OLD README
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
             echo "No README found." > current_readme.txt
           fi
 
-      - name: 3. Call Gemini API (Lyra Optimized)
+      - name: 3. Call Gemini API (Strict Mode)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          # --- ФОРМИРОВАНИЕ ПРОМПТА ---
           cat <<'EOF_PROMPT' > prompt.txt
-          # ROLE: Senior Technical Writer & Code Analyst
-
-          ## INPUTS:
-          1. **CONTEXT:** Project structure & dependencies.
-          2. **DIFF:** The raw code changes in this PR.
-          3. **OLD README:** Current documentation.
-
-          ## OBJECTIVE:
-          You must generate two distinct outputs enclosed in strict tags.
-
-          ### PART 1: CHANGE LOG (For the PR Comment)
-          Analyze the DIFF. Summarize *only* what changed.
+          # ROLE: Documentation Assistant
           
-          **⛔ CRITICAL CONSTRAINTS (MUST FOLLOW):**
-          1. **NO FULL TEXT:** Do NOT output the full content of README.md or any file here.
-          2. **NO WALLS OF TEXT:** Use bullet points only.
-          3. **STRUCTURE:** Group changes by filename.
-
-          **REQUIRED FORMAT for Change Log:**
+          ## INPUTS:
+          1. **DIFF:** Code changes.
+          2. **OLD README:** Current docs.
+          
+          ## TASK 1: THE COMMENT (Log Only)
+          Analyze the DIFF and create a concise summary.
+          
+          **⛔ STRICT CONSTRAINTS:**
+          - **ABSOLUTELY NO** full file content in this section.
+          - **NO** long paragraphs.
+          - **ONLY** bullet points grouped by file.
+          
+          **FORMAT for Change Log:**
           ### 📂 `[Filename]`
-          - **Change:** [Concise description of the edit]
-          - **Why:** [Brief rationale]
-
-          ### PART 2: THE UPDATED README (For the file)
-          Take the "OLD README" and integrate the changes from "DIFF".
-          - Keep the original structure.
-          - Output the FULL Markdown content of the new README.
-
-          ## OUTPUT WRAPPER (STRICT):
+          - **Change:** [Action] [Detail]
+          - **Reason:** [Brief Why]
+          
+          ## TASK 2: THE FILE (For Commit)
+          Generate the FULL updated README.md content integrating the changes.
+          
+          ## OUTPUT WRAPPER:
           START_CHANGE_LOG
-          (Insert the File-by-File summary here)
+          (Insert ONLY the concise summary here)
           END_CHANGE_LOG
-
+          
           START_README
-          (Insert the FULL updated README.md content here)
+          (Insert the FULL updated README content here)
           END_README
           EOF_PROMPT
-          # -----------------------------
 
           sed -i "s/PROJECT_NAME_PH/$REPO_NAME/g" prompt.txt
           
-          # Собираем payload
           cat prompt.txt > full_input.txt
-          echo -e "\n\n## PROJECT CONTEXT:\n" >> full_input.txt
+          echo -e "\n\n## CONTEXT:\n" >> full_input.txt
           cat context.txt >> full_input.txt
           echo -e "\n\n## CURRENT README:\n" >> full_input.txt
           cat current_readme.txt >> full_input.txt
-          echo -e "\n\n## PR DIFF:\n" >> full_input.txt
+          echo -e "\n\n## DIFF:\n" >> full_input.txt
           cat pr_diff.txt >> full_input.txt
 
           jq -n --rawfile text full_input.txt '{ contents: [{ parts: [{ text: $text }] }] }' > payload.json
           
-          # Отправка запроса (Используем модель 1.5-flash как стабильную, поменяйте на 2.0 если есть доступ)
           curl -s -H "Content-Type: application/json" -d @payload.json "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
           
-          # Парсинг ответа
           jq -r '.candidates[0].content.parts[0].text' response.json > gemini_full_response.txt
 
-      - name: 4. Process & Comment (Smart Logic)
+      - name: 4. Process Response
         uses: actions/github-script@v6
         with:
           script: |
@@ -134,9 +113,8 @@ jobs:
             
             const fullText = fs.readFileSync('gemini_full_response.txt', 'utf8');
             
-            // --- ПАРСИНГ ОТВЕТА GEMINI ---
-            let changeLog = "Updates found.";
-            let readme = fullText;
+            let changeLog = "Updates detected.";
+            let readme = "";
 
             if (fullText.includes('START_CHANGE_LOG') && fullText.includes('END_CHANGE_LOG')) {
                 changeLog = fullText.split('START_CHANGE_LOG')[1].split('END_CHANGE_LOG')[0].trim();
@@ -145,62 +123,27 @@ jobs:
                 readme = fullText.split('START_README')[1].split('END_README')[0].trim();
             }
 
+            // 1. Если есть метка - обновляем файл
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
-            const shouldCommit = labels.includes('generate-readme');
-
-            if (shouldCommit) {
-                console.log("LABEL FOUND! Writing file...");
+            if (labels.includes('generate-readme') && readme) {
+                console.log("Writing new README file...");
                 fs.writeFileSync('README.md', readme);
-            } else {
-                // --- ЛОГИКА КОММЕНТАРИЕВ ---
-                
-                // 1. STICKY COMMENT (Главный комментарий со спойлером)
-                const header = "🤖 **Documentation Agent (Master Preview)**";
-                const stickyBody = `${header}\n\n` +
-                                   `Это актуальная версия документации на данный момент.\n` +
-                                   `👉 **Чтобы применить:** Поставьте метку **\`generate-readme\`**.\n\n` +
-                                   `<details><summary>📜 **Показать полный текст README** (Нажмите чтобы развернуть)</summary>\n\n` +
-                                   `\`\`\`markdown\n${readme}\n\`\`\`\n` +
-                                   `</details>`;
-                
-                const { data: comments } = await github.rest.issues.listComments({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: context.issue.number,
-                });
-                
-                const stickyComment = comments.find(c => c.body.includes(header));
-
-                if (stickyComment) {
-                    await github.rest.issues.updateComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        comment_id: stickyComment.id,
-                        body: stickyBody
-                    });
-                } else {
-                    await github.rest.issues.createComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        issue_number: context.issue.number,
-                        body: stickyBody
-                    });
-                }
-
-                // 2. HISTORY COMMENT (Аккуратный лог изменений)
-                // Этот комментарий добавляется отдельно в ленту и не содержит полного файла!
-                const historyBody = `🚀 **Update Analysis**\n\n` +
-                                    `${changeLog}`;
+            } 
+            
+            // 2. Всегда пишем ТОЛЬКО краткий лог в комментарии
+            // Никакого полного текста, никаких спойлеров.
+            if (changeLog) {
+                const body = `🤖 **Documentation Update**\n\n${changeLog}`;
                 
                 await github.rest.issues.createComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: context.issue.number,
-                    body: historyBody
+                    body: body
                 });
             }
 
-      - name: 5. Commit Changes
+      - name: 5. Commit & Push
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
@@ -213,7 +156,7 @@ jobs:
             git push
           fi
 
-      - name: 6. Remove Label
+      - name: 6. Cleanup Label
         if: always() && contains(github.event.pull_request.labels.*.name, 'generate-readme')
         uses: actions/github-script@v6
         with:
