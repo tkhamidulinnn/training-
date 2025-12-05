@@ -43,7 +43,7 @@ jobs:
           
           git ls-files --exclude-standard | grep -v "^.github/" > file_tree.txt
 
-      - name: 3. Call Gemini API (No Diagrams, No Tables)
+      - name: 3. Call Gemini API (Fixed Model)
         id: gemini_call
         env:
           REPO_NAME: ${{ github.event.repository.name }}
@@ -118,10 +118,10 @@ jobs:
               }]
             }' > payload.json
 
-          # Используем 1.5-flash
+          # ИСПРАВЛЕНО: Используем gemini-1.5-flash-latest вместо gemini-1.5-flash
           curl -s -H "Content-Type: application/json" \
                -d @payload.json \
-               "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" > response.json
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY" > response.json
 
           if jq -e '.error' response.json > /dev/null; then
             echo "Error returned from API:"
@@ -163,32 +163,4 @@ jobs:
             } else {
               console.log("Updating comment...");
               const header = "🤖 **Documentation Agent**";
-              const body = `${header}\n\n### 📝 Что изменилось в последнем коммите:\n${summary}\n\n---\n👉 **Применить?** Поставьте метку **\`generate-readme\`**.\n\n<details><summary>👀 Посмотреть полный README.md</summary>\n\n\`\`\`markdown\n${readmeContent}\n\`\`\`\n</details>`;
-              
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              });
-              const botComment = comments.find(c => c.body.includes(header));
-              if (botComment) {
-                await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: botComment.id, body: body });
-              } else {
-                await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: body });
-              }
-            }
-
-      - name: 5. Commit Changes
-        if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
-        run: |
-          git config --global user.name "Gemini Docs Agent"
-          git config --global user.email "actions@github.com"
-          git add README.md
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "docs: auto-update README.md [skip ci]"
-            git push
-            curl -L -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "[https://api.github.com/repos/$](https://api.github.com/repos/$){{ github.repository }}/issues/${{ github.event.number }}/labels/generate-readme"
-          fi
+              const body = `${header}\n\n### 📝 Что изменилось в
