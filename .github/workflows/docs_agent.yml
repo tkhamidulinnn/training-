@@ -1,4 +1,4 @@
-name: 🤖 Documentation Agent (v36.0 - Robust Legacy)
+name: 🤖 Documentation Agent (v37.0 - Stable Fix)
 
 on:
   pull_request:
@@ -24,26 +24,32 @@ jobs:
         run: |
           git fetch origin ${{ github.base_ref }}
           
-          # 1. Diff
           if [ "${{ github.event_name }}" == "pull_request" ]; then
              git diff origin/${{ github.base_ref }} HEAD -- . ":(exclude).github" ":(exclude).gitignore" > pr_diff.txt
           else
              echo "Manual Run" > pr_diff.txt
           fi
 
-          # 2. Current README
           if [ -f "README.md" ]; then
             cp README.md current_readme.txt
           else
             echo "No README found." > current_readme.txt
           fi
 
-      - name: 3. Call Gemini API
+      - name: 3. Call Gemini API (Key Fix)
         id: gemini_call
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          # Простой и надежный промпт
+          # --- ИСПРАВЛЕНИЕ ОШИБКИ "Exit Code 3" ---
+          # Удаляем невидимые пробелы из ключа
+          CLEAN_KEY=$(echo "$GEMINI_API_KEY" | tr -d '[:space:]')
+          
+          if [ -z "$CLEAN_KEY" ]; then
+            echo "❌ Error: API Key is empty!"
+            exit 1
+          fi
+
           cat <<'EOF_PROMPT' > prompt.txt
           Role: Technical Writer.
           Task: Update the README.md based on the code changes.
@@ -68,16 +74,16 @@ jobs:
 
           jq -n --rawfile text full_input.txt '{ contents: [{ parts: [{ text: $text }] }] }' > payload.json
           
-          # Отправка запроса с обработкой ошибок
+          # Используем очищенный ключ CLEAN_KEY
           curl -s -H "Content-Type: application/json" \
             -d @payload.json \
-            "[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY)" \
+            "[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$CLEAN_KEY](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$CLEAN_KEY)" \
             > response.json
           
-          # Парсинг с защитой от пустоты
+          # Парсим ответ
           jq -r '.candidates[0].content.parts[0].text // empty' response.json | sed 's/^```markdown//' | sed 's/^```//' | sed 's/```$//' > gemini_response.txt
 
-      - name: 4. Process Logic (Safe Check)
+      - name: 4. Process (Safe Logic)
         uses: actions/github-script@v6
         with:
           script: |
@@ -86,23 +92,20 @@ jobs:
             
             const newReadme = fs.readFileSync('gemini_response.txt', 'utf8').trim();
             
-            // --- ЗАЩИТА V36 ---
-            // Если текст пустой или слишком короткий, значит произошла ошибка API.
-            // Мы НЕ записываем файл, чтобы не испортить репозиторий.
+            // Если ответ пустой или слишком короткий - выходим
             if (!newReadme || newReadme.length < 50) {
-                console.log("❌ ERROR: Gemini returned invalid/empty content. Aborting.");
-                console.log("Debug Info:", newReadme);
+                console.log("❌ Error: Gemini output is invalid or empty.");
                 return; 
             }
 
             const labels = context.payload.pull_request ? context.payload.pull_request.labels.map(l => l.name) : [];
             
             if (labels.includes('generate-readme')) {
-                console.log("✅ Label found. Updating file on disk.");
+                console.log("✅ Label found. Updating README.md");
                 fs.writeFileSync('README.md', newReadme);
             } else {
-                console.log("ℹ️ No label. Posting preview comment.");
-                const body = `🤖 **Documentation Preview (v36)**\n\n` +
+                console.log("ℹ️ No label. Posting comment.");
+                const body = `🤖 **Documentation Preview (v37)**\n\n` +
                              `To apply this update, add label \`generate-readme\`.\n\n` +
                              `<details><summary>📄 **View Generated README**</summary>\n\n` +
                              `\`\`\`markdown\n${newReadme}\n\`\`\`\n` +
@@ -116,7 +119,7 @@ jobs:
                 });
             }
 
-      - name: 5. Commit & Push (With Rebase Fix)
+      - name: 5. Commit & Push (Rebase Safe)
         if: contains(github.event.pull_request.labels.*.name, 'generate-readme')
         run: |
           git config --global user.name "Gemini Docs Agent"
@@ -127,10 +130,9 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes."
           else
-            git commit -m "docs: update README.md"
+            git commit -m "docs: auto-update README.md [skip ci]"
             
-            # --- ВАЖНОЕ ИСПРАВЛЕНИЕ V36 ---
-            # Перед отправкой забираем изменения из ветки, чтобы не было конфликтов
+            # ЗАЩИТА ОТ КОНФЛИКТОВ
             git pull origin ${{ github.event.pull_request.head.ref }} --rebase --autostash
             
             git push origin HEAD:${{ github.event.pull_request.head.ref }}
